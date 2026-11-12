@@ -1,0 +1,461 @@
+<?php
+/**
+ * Model: AIConfigModel
+ * Store: nnasa_ca Accessories Marketplace
+ * Handles all database operations for AI Providers, Models, Prompts, Settings, and Usage Logs.
+ */
+
+require_once dirname(__DIR__) . '/Config/database.php';
+require_once dirname(__DIR__) . '/Helpers/security.php';
+require_once dirname(__DIR__) . '/Services/AIProviderAdapterInterface.php';
+require_once dirname(__DIR__) . '/Services/Adapters/GeminiAdapter.php';
+require_once dirname(__DIR__) . '/Services/Adapters/OpenAIAdapter.php';
+
+class AIConfigModel {
+    private PDO $db;
+
+    public function __construct(?PDO $db = null) {
+        $this->db = $db ?? getDB();
+    }
+
+    /* =========================================================================
+     * 1. PROVIDERS
+     * ========================================================================= */
+
+    public function getAllProviders(): array {
+        $stmt = $this->db->query("SELECT * FROM ai_providers ORDER BY is_active DESC, id ASC");
+        $providers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($providers as &$p) {
+            $rawKey = $this->decryptCredential($p['credential_reference'] ?? '');
+            $p['has_key'] = !empty($rawKey);
+            $p['api_key_masked'] = !empty($rawKey) ? mask_api_key($rawKey) : 'Belum Dikonfigurasi';
+            // Never expose actual credential reference or raw key
+            unset($p['credential_reference']);
+        }
+        return $providers;
+    }
+
+    public function getProviderById(int $id): ?array {
+        $stmt = $this->db->prepare("SELECT * FROM ai_providers WHERE id = ?");
+        $stmt->execute([$id]);
+        $p = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$p) return null;
+
+        $rawKey = $this->decryptCredential($p['credential_reference'] ?? '');
+        $p['has_key'] = !empty($rawKey);
+        $p['api_key_masked'] = !empty($rawKey) ? mask_api_key($rawKey) : 'Belum Dikonfigurasi';
+        unset($p['credential_reference']);
+        return $p;
+    }
+
+    public function getProviderByName(string $name): ?array {
+        $stmt = $this->db->prepare("SELECT * FROM ai_providers WHERE provider_name = ? LIMIT 1");
+        $stmt->execute([$name]);
+        $p = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$p) return null;
+
+        $rawKey = $this->decryptCredential($p['credential_reference'] ?? '');
+        $p['has_key'] = !empty($rawKey);
+        $p['api_key_masked'] = !empty($rawKey) ? mask_api_key($rawKey) : 'Belum Dikonfigurasi';
+        unset($p['credential_reference']);
+        return $p;
+    }
+
+    public function getActiveProvider(): ?array {
+        $stmt = $this->db->query("SELECT * FROM ai_providers WHERE is_active = 1 ORDER BY id ASC LIMIT 1");
+        $p = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$p) return null;
+
+        $rawKey = $this->decryptCredential($p['credential_reference'] ?? '');
+        $p['has_key'] = !empty($rawKey);
+        $p['api_key_masked'] = !empty($rawKey) ? mask_api_key($rawKey) : 'Belum Dikonfigurasi';
+        unset($p['credential_reference']);
+        return $p;
+    }
+
+    public function getDecryptedApiKey(int $providerId): ?string {
+        $stmt = $this->db->prepare("SELECT credential_reference FROM ai_providers WHERE id = ?");
+        $stmt->execute([$providerId]);
+        $ref = $stmt->fetchColumn();
+        return $this->decryptCredential($ref ?: '');
+    }
+
+    public function saveProvider(array $data): int {
+        $id = !empty($data['id']) ? (int)$data['id'] : 0;
+        $name = trim($data['provider_name'] ?? '');
+        $display = trim($data['display_name'] ?? $name);
+        $baseUrl = !empty($data['base_url']) ? trim($data['base_url']) : null;
+        $isActive = !empty($data['is_active']) ? 1 : 0;
+        $apiKey = $data['api_key'] ?? null;
+
+        $credentialRef = null;
+        if (!empty($apiKey) && !str_contains($apiKey, '••••') && !str_contains($apiKey, '****')) {
+            // New raw key entered -> encrypt
+            $credentialRef = encrypt_secret(trim($apiKey));
+        }
+
+        if ($isActive) {
+            // Ensure single active provider policy
+            $this->db->query("UPDATE ai_providers SET is_active = 0");
+        }
+
+        if ($id > 0) {
+            // Update existing
+            if ($credentialRef !== null) {
+                $sql = "UPDATE ai_providers 
+                        SET display_name = ?, base_url = ?, credential_reference = ?, is_active = ?, updated_at = NOW() 
+                        WHERE id = ?";
+                $stmt = $this->db->prepare($sql);
+                $stmt->execute([$display, $baseUrl, $credentialRef, $isActive, $id]);
+            } else {
+                $sql = "UPDATE ai_providers 
+                        SET display_name = ?, base_url = ?, is_active = ?, updated_at = NOW() 
+                        WHERE id = ?";
+                $stmt = $this->db->prepare($sql);
+                $stmt->execute([$display, $baseUrl, $isActive, $id]);
+            }
+            if ($isActive) {
+                $this->syncDefaultModelForProvider($id);
+            }
+            return $id;
+        } else {
+            // Insert new
+            $sql = "INSERT INTO ai_providers (provider_name, display_name, base_url, credential_reference, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, NOW(), NOW())";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$name, $display, $baseUrl, $credentialRef, $isActive]);
+            $newId = (int)$this->db->lastInsertId();
+            if ($isActive && $newId > 0) {
+                $this->syncDefaultModelForProvider($newId);
+            }
+            return $newId;
+        }
+    }
+
+    public function setProviderActive(int $id, bool $isActive = true): bool {
+        if ($isActive) {
+            // Deactivate all others, activate this one
+            $this->db->query("UPDATE ai_providers SET is_active = 0");
+            $stmt = $this->db->prepare("UPDATE ai_providers SET is_active = 1, updated_at = NOW() WHERE id = ?");
+            $res = $stmt->execute([$id]);
+            $this->syncDefaultModelForProvider($id);
+            return $res;
+        } else {
+            $stmt = $this->db->prepare("UPDATE ai_providers SET is_active = 0, updated_at = NOW() WHERE id = ?");
+            return $stmt->execute([$id]);
+        }
+    }
+
+    private function syncDefaultModelForProvider(int $providerId): void {
+        try {
+            // Reset default for other providers
+            $stmtOther = $this->db->prepare("UPDATE ai_models SET is_default = 0 WHERE provider_id != ?");
+            $stmtOther->execute([$providerId]);
+
+            // Check if this provider already has an active default model
+            $stmtCheck = $this->db->prepare("SELECT id FROM ai_models WHERE provider_id = ? AND is_default = 1 AND is_active = 1 LIMIT 1");
+            $stmtCheck->execute([$providerId]);
+            if (!$stmtCheck->fetchColumn()) {
+                // Make the first model for this provider active and default
+                $stmtDef = $this->db->prepare("UPDATE ai_models SET is_default = 1, is_active = 1, updated_at = NOW() WHERE provider_id = ? ORDER BY id ASC LIMIT 1");
+                $stmtDef->execute([$providerId]);
+            }
+        } catch (Exception $e) {
+            // Silent fallback
+        }
+    }
+
+    /* =========================================================================
+     * 2. MODELS
+     * ========================================================================= */
+
+    public function getAllModels(?int $providerId = null): array {
+        $sql = "SELECT m.*, p.display_name AS provider_display, p.provider_name 
+                FROM ai_models m 
+                LEFT JOIN ai_providers p ON m.provider_id = p.id ";
+        $params = [];
+        if ($providerId !== null) {
+            $sql .= " WHERE m.provider_id = ?";
+            $params[] = $providerId;
+        }
+        $sql .= " ORDER BY m.is_default DESC, m.is_active DESC, m.id ASC";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $models = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($models as &$m) {
+            $m['params'] = !empty($m['parameters_json']) ? json_decode($m['parameters_json'], true) : [];
+        }
+        return $models;
+    }
+
+    public function getModelById(int $id): ?array {
+        $stmt = $this->db->prepare("SELECT m.*, p.display_name AS provider_display, p.provider_name 
+                                    FROM ai_models m 
+                                    LEFT JOIN ai_providers p ON m.provider_id = p.id 
+                                    WHERE m.id = ?");
+        $stmt->execute([$id]);
+        $m = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$m) return null;
+        $m['params'] = !empty($m['parameters_json']) ? json_decode($m['parameters_json'], true) : [];
+        return $m;
+    }
+
+    public function getDefaultModel(): ?array {
+        $stmt = $this->db->query("SELECT m.*, p.display_name AS provider_display, p.provider_name, p.base_url, p.credential_reference
+                                  FROM ai_models m 
+                                  INNER JOIN ai_providers p ON m.provider_id = p.id 
+                                  WHERE m.is_default = 1 AND m.is_active = 1 AND p.is_active = 1 
+                                  LIMIT 1");
+        $m = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$m) {
+            // Fallback: any active model with active provider
+            $stmt = $this->db->query("SELECT m.*, p.display_name AS provider_display, p.provider_name, p.base_url, p.credential_reference
+                                      FROM ai_models m 
+                                      INNER JOIN ai_providers p ON m.provider_id = p.id 
+                                      WHERE m.is_active = 1 AND p.is_active = 1 
+                                      ORDER BY m.id ASC LIMIT 1");
+            $m = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+        if (!$m) return null;
+
+        $m['params'] = !empty($m['parameters_json']) ? json_decode($m['parameters_json'], true) : [];
+        return $m;
+    }
+
+    public function setDefaultModel(int $modelId): bool {
+        $this->db->query("UPDATE ai_models SET is_default = 0");
+        $stmt = $this->db->prepare("UPDATE ai_models SET is_default = 1, is_active = 1, updated_at = NOW() WHERE id = ?");
+        return $stmt->execute([$modelId]);
+    }
+
+    public function saveModel(array $data): int {
+        $id = !empty($data['id']) ? (int)$data['id'] : 0;
+        $providerId = (int)$data['provider_id'];
+        $modelName = trim($data['model_name'] ?? '');
+        $display = trim($data['display_name'] ?? $modelName);
+        $isDefault = !empty($data['is_default']) ? 1 : 0;
+        $isActive = !empty($data['is_active']) ? 1 : 0;
+        $timeout = isset($data['timeout_seconds']) ? (int)$data['timeout_seconds'] : 10;
+        $maxTokens = isset($data['max_output_tokens']) ? (int)$data['max_output_tokens'] : 600;
+
+        $params = $data['parameters'] ?? [];
+        if (isset($data['temperature'])) $params['temperature'] = (float)$data['temperature'];
+        if (isset($data['top_p'])) $params['top_p'] = (float)$data['top_p'];
+        $paramsJson = !empty($params) ? json_encode($params) : null;
+
+        if ($isDefault) {
+            $this->db->query("UPDATE ai_models SET is_default = 0");
+        }
+
+        if ($id > 0) {
+            $sql = "UPDATE ai_models 
+                    SET provider_id = ?, model_name = ?, display_name = ?, is_default = ?, is_active = ?,
+                        timeout_seconds = ?, max_output_tokens = ?, parameters_json = ?, updated_at = NOW()
+                    WHERE id = ?";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$providerId, $modelName, $display, $isDefault, $isActive, $timeout, $maxTokens, $paramsJson, $id]);
+            return $id;
+        } else {
+            $sql = "INSERT INTO ai_models (provider_id, model_name, display_name, is_default, is_active, timeout_seconds, max_output_tokens, parameters_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$providerId, $modelName, $display, $isDefault, $isActive, $timeout, $maxTokens, $paramsJson]);
+            return (int)$this->db->lastInsertId();
+        }
+    }
+
+    public function toggleModelActive(int $id, bool $isActive): bool {
+        $val = $isActive ? 1 : 0;
+        $stmt = $this->db->prepare("UPDATE ai_models SET is_active = ?, updated_at = NOW() WHERE id = ?");
+        return $stmt->execute([$val, $id]);
+    }
+
+    public function deleteModel(int $id): bool {
+        $stmt = $this->db->prepare("DELETE FROM ai_models WHERE id = ? AND is_default = 0");
+        return $stmt->execute([$id]);
+    }
+
+    /* =========================================================================
+     * 3. SYSTEM PROMPTS (With Versioning)
+     * ========================================================================= */
+
+    public function getAllPrompts(): array {
+        $stmt = $this->db->query("SELECT * FROM ai_prompts ORDER BY status = 'active' DESC, id DESC");
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function getActivePrompt(): ?array {
+        $stmt = $this->db->query("SELECT * FROM ai_prompts WHERE status = 'active' ORDER BY id DESC LIMIT 1");
+        $p = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $p ?: null;
+    }
+
+    public function getPromptById(int $id): ?array {
+        $stmt = $this->db->prepare("SELECT * FROM ai_prompts WHERE id = ?");
+        $stmt->execute([$id]);
+        $p = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $p ?: null;
+    }
+
+    public function savePrompt(array $data): int {
+        $name = trim($data['prompt_name'] ?? 'Prompt nnasa_ca');
+        $content = trim($data['prompt_content'] ?? '');
+        $version = trim($data['version'] ?? 'v1.0');
+        $status = in_array($data['status'] ?? '', ['active', 'draft', 'archived']) ? $data['status'] : 'draft';
+        $createdBy = !empty($data['created_by']) ? (int)$data['created_by'] : null;
+
+        if ($status === 'active') {
+            $this->db->query("UPDATE ai_prompts SET status = 'archived' WHERE status = 'active'");
+        }
+
+        $sql = "INSERT INTO ai_prompts (prompt_name, prompt_content, version, status, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, NOW(), NOW())";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([$name, $content, $version, $status, $createdBy]);
+        return (int)$this->db->lastInsertId();
+    }
+
+    public function setActivePrompt(int $id): bool {
+        $this->db->query("UPDATE ai_prompts SET status = 'archived' WHERE status = 'active'");
+        $stmt = $this->db->prepare("UPDATE ai_prompts SET status = 'active', updated_at = NOW() WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /* =========================================================================
+     * 4. SETTINGS
+     * ========================================================================= */
+
+    public function getAllSettings(): array {
+        $stmt = $this->db->query("SELECT setting_key, setting_value FROM ai_settings");
+        return $stmt->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+    }
+
+    public function getSetting(string $key, $default = null) {
+        $stmt = $this->db->prepare("SELECT setting_value FROM ai_settings WHERE setting_key = ?");
+        $stmt->execute([$key]);
+        $val = $stmt->fetchColumn();
+        return ($val !== false) ? $val : $default;
+    }
+
+    public function saveSettings(array $settings): bool {
+        $stmt = $this->db->prepare("INSERT INTO ai_settings (setting_key, setting_value, updated_at) 
+                                    VALUES (?, ?, NOW()) 
+                                    ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()");
+        foreach ($settings as $k => $v) {
+            $stmt->execute([$k, (string)$v]);
+        }
+        return true;
+    }
+
+    /* =========================================================================
+     * 5. USAGE LOGS & DASHBOARD METRICS
+     * ========================================================================= */
+
+    public function logUsage(array $data): int {
+        $sql = "INSERT INTO ai_usage_logs (provider_id, model_id, user_id, request_status, input_tokens, output_tokens, latency_ms, estimated_cost, error_code, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([
+            $data['provider_id'] ?? null,
+            $data['model_id'] ?? null,
+            $data['user_id'] ?? null,
+            $data['request_status'] ?? 'success',
+            (int)($data['input_tokens'] ?? 0),
+            (int)($data['output_tokens'] ?? 0),
+            (int)($data['latency_ms'] ?? 0),
+            (float)($data['estimated_cost'] ?? 0),
+            $data['error_code'] ?? null
+        ]);
+        return (int)$this->db->lastInsertId();
+    }
+
+    public function getUsageLogs(int $limit = 50, int $offset = 0, ?string $statusFilter = null): array {
+        $sql = "SELECT l.*, p.display_name AS provider_name, m.display_name AS model_name, u.name AS user_name, u.email AS user_email
+                FROM ai_usage_logs l
+                LEFT JOIN ai_providers p ON l.provider_id = p.id
+                LEFT JOIN ai_models m ON l.model_id = m.id
+                LEFT JOIN users u ON l.user_id = u.id";
+        $params = [];
+        if (!empty($statusFilter)) {
+            $sql .= " WHERE l.request_status = ?";
+            $params[] = $statusFilter;
+        }
+        $sql .= " ORDER BY l.id DESC LIMIT ? OFFSET ?";
+        
+        $stmt = $this->db->prepare($sql);
+        foreach ($params as $i => $val) {
+            $stmt->bindValue($i + 1, $val);
+        }
+        $stmt->bindValue(count($params) + 1, $limit, PDO::PARAM_INT);
+        $stmt->bindValue(count($params) + 2, $offset, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function getDashboardMetrics(): array {
+        // Total requests, success, failed, tokens, avg latency, estimated cost
+        $stmt = $this->db->query("SELECT 
+            COUNT(*) AS total_requests,
+            SUM(CASE WHEN request_status = 'success' THEN 1 ELSE 0 END) AS success_requests,
+            SUM(CASE WHEN request_status = 'failed' THEN 1 ELSE 0 END) AS failed_requests,
+            COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+            COALESCE(SUM(input_tokens + output_tokens), 0) AS total_tokens,
+            COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
+            COALESCE(SUM(estimated_cost), 0) AS total_cost
+        FROM ai_usage_logs");
+        $stats = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        // Today & this month counts
+        $todayStmt = $this->db->query("SELECT COUNT(*) FROM ai_usage_logs WHERE DATE(created_at) = CURDATE()");
+        $stats['today_requests'] = (int)$todayStmt->fetchColumn();
+
+        $monthStmt = $this->db->query("SELECT COUNT(*) FROM ai_usage_logs WHERE MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())");
+        $stats['month_requests'] = (int)$monthStmt->fetchColumn();
+
+        // Recent errors (last 5)
+        $errStmt = $this->db->query("SELECT l.*, p.display_name AS provider_name, m.display_name AS model_name
+                                     FROM ai_usage_logs l
+                                     LEFT JOIN ai_providers p ON l.provider_id = p.id
+                                     LEFT JOIN ai_models m ON l.model_id = m.id
+                                     WHERE l.request_status = 'failed'
+                                     ORDER BY l.id DESC LIMIT 5");
+        $stats['recent_errors'] = $errStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Active provider & model info
+        $stats['active_provider'] = $this->getActiveProvider();
+        $stats['active_model'] = $this->getDefaultModel();
+        $stats['last_test_time'] = $this->getSetting('ai_last_test_time', 'Belum Ada Data');
+
+        return $stats;
+    }
+
+    /* =========================================================================
+     * 6. ADAPTER FACTORY
+     * ========================================================================= */
+
+    public function getAdapter(string $providerName, ?string $apiKey = null): ?AIProviderAdapterInterface {
+        $pName = strtolower(trim($providerName));
+        if ($pName === 'gemini') {
+            return new GeminiAdapter($apiKey);
+        } elseif ($pName === 'openai') {
+            return new OpenAIAdapter($apiKey);
+        }
+        return null;
+    }
+
+    /* =========================================================================
+     * INTERNAL HELPERS
+     * ========================================================================= */
+
+    private function decryptCredential(string $ref): ?string {
+        if (empty($ref)) return null;
+        if (str_starts_with($ref, 'enc:')) {
+            return decrypt_secret($ref);
+        }
+        return $ref; // fallback for unencrypted legacy keys
+    }
+}

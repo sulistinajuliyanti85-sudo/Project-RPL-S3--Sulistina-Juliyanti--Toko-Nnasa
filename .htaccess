@@ -1,0 +1,28 @@
+# Apache Configuration for nnasa_ca (XAMPP / Production)
+# Protect sensitive files from direct browser download
+
+<FilesMatch "^\.">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+<Files .env>
+    Order allow,deny
+    Deny from all
+</Files>
+
+<FilesMatch "\.(sql|log|ini|sh|bak)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /toko/
+
+    # Friendly routes for WhatsApp OTP APIs
+    RewriteRule ^api/auth/whatsapp-otp/([a-zA-Z0-9_-]+)$ api/auth-whatsapp-otp.php?action=$1 [QSA,L]
+    RewriteRule ^api/admin/whatsapp-otp/([a-zA-Z0-9_-]+)$ api/admin/whatsapp-otp.php?action=$1 [QSA,L]
+</IfModule>

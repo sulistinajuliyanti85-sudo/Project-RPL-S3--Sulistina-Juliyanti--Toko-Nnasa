@@ -1,0 +1,19 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Vendor & Composer
+/vendor/
+
+# Database dumps / sensitive files
+*.sql
+*.log
+scratch/
+tests/api keys/
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

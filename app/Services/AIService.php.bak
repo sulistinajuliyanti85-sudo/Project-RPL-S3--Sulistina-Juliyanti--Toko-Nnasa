@@ -1,0 +1,2372 @@
+<?php
+/**
+ * NNasa AI Assistant Service (Platform-Wide Integration)
+ * Store: nnasa_ca Accessories Marketplace
+ * 
+ * Provides:
+ * - Natural Language Understanding (Indonesian slang, typos, intent recognition)
+ * - Multi-turn conversational context memory & drill-down filtering
+ * - Deep Database Grounding via ProductIntelligenceService & OrderIntelligenceService
+ * - Full Platform Feature Navigation via FeatureRegistry
+ * - Role-Based Access Control (RBAC) awareness (Public, Customer, Admin)
+ * - Anti-hallucination guardrails (only factual store & database data)
+ * - Dual Engine: Google Gemini API (if key configured) with seamless fallback to Built-in Intelligent RAG Engine
+ */
+
+require_once __DIR__ . '/FeatureRegistry.php';
+require_once __DIR__ . '/ProductIntelligenceService.php';
+require_once __DIR__ . '/OrderIntelligenceService.php';
+require_once dirname(__DIR__) . '/Models/AIConfigModel.php';
+
+class AIService {
+    private PDO $db;
+    private array $settings = [];
+    private ?string $apiKey = null;
+    private string $provider = 'builtin';
+
+    private ProductIntelligenceService $productService;
+    private OrderIntelligenceService $orderService;
+    private AIConfigModel $aiConfig;
+
+    public function __construct(PDO $db) {
+        $this->db = $db;
+        $this->aiConfig = new AIConfigModel($db);
+        $this->productService = new ProductIntelligenceService($db);
+        $this->orderService = new OrderIntelligenceService($db);
+        $this->loadSettings();
+    }
+
+    /**
+     * Load settings from database & config
+     */
+    private function loadSettings(): void {
+        try {
+            $stmt = $this->db->query("SELECT setting_key, setting_value FROM settings");
+            $this->settings = $stmt->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+        } catch (Exception $e) {
+            $this->settings = [];
+        }
+
+        // Retrieve active provider and model from AIConfigModel
+        $activeProv = $this->aiConfig->getActiveProvider();
+        if ($activeProv && !empty($activeProv['id'])) {
+            $this->apiKey = $this->aiConfig->getDecryptedApiKey((int)$activeProv['id']);
+            $this->provider = !empty($this->apiKey) ? $activeProv['provider_name'] : 'builtin';
+        } else {
+            $this->apiKey = null;
+            $this->provider = 'builtin';
+        }
+    }
+
+    /**
+     * Main conversation processor with user role context
+     */
+    public function processMessage(string $userMessage, array &$context = [], ?array $user = null): array {
+        $trimmed = trim($userMessage);
+        $role = $user['role'] ?? 'public';
+        $userId = isset($user['id']) ? (int)$user['id'] : null;
+
+        if ($trimmed === '') {
+            $welcome = $this->settings['ai_welcome_message'] ?? 'Hai! Selamat datang di nnasa_ca. Aku NNasa AI, asisten virtual resmi yang siap membantu kamu mencari aksesoris, mengecek harga dan ketersediaan produk, serta menjawab pertanyaan tentang toko kami. Ada yang bisa aku bantu?';
+            return [
+                'success' => true,
+                'reply' => $welcome,
+                'products' => [],
+                'suggestions' => $this->getDefaultSuggestions($role),
+                'provider' => $this->provider
+            ];
+        }
+
+        $normalized = $this->normalizeText($trimmed);
+
+        // 1. Direct Feature Navigation Search Check (instant URL guidance)
+        $featureMatch = $this->handleFeatureSearch($normalized, $role);
+        if ($featureMatch !== null) {
+            return $featureMatch;
+        }
+
+        // 2. Deterministic Database Operations (counted with mathematical precision via MySQL PDO)
+        if ($this->isDeterministicQuery($normalized, $context)) {
+            return $this->processBuiltinEngine($trimmed, $normalized, $context, $user);
+        }
+
+        // 3. Conversational, Creative Styling, Gift Advice, or General Inquiries
+        // Query active LLM Provider (Gemini / OpenAI) grounded in real database inventory catalog
+        $llmResponse = $this->queryLLMProvider($trimmed, $normalized, $context, $user);
+        if ($llmResponse !== null) {
+            return $llmResponse;
+        }
+
+        // 4. Built-in Engine Fallback
+        return $this->processBuiltinEngine($trimmed, $normalized, $context, $user);
+    }
+
+    /**
+     * Built-in Intelligent Engine
+     */
+    private function processBuiltinEngine(string $original, string $normalized, array &$context, ?array $user = null): array {
+        $context['turn_count'] = ($context['turn_count'] ?? 0) + 1;
+        $context['history'] = $context['history'] ?? [];
+        $role = $user['role'] ?? 'public';
+        $userId = isset($user['id']) ? (int)$user['id'] : null;
+        $isAdmin = ($role === 'admin' || $role === 'staff');
+
+        // 1. Greetings / Chit-chat
+        if ($this->isGreeting($normalized)) {
+            $welcome = $this->settings['ai_welcome_message'] ?? 'Hai! Selamat datang di nnasa_ca. Aku NNasa AI, asisten virtual resmi yang siap membantu kamu mencari aksesoris, mengecek harga dan ketersediaan produk, serta menjawab pertanyaan tentang toko kami. Ada yang bisa aku bantu?';
+            return [
+                'success' => true,
+                'reply' => $welcome,
+                'products' => [],
+                'suggestions' => $this->getDefaultSuggestions($role),
+                'provider' => 'builtin'
+            ];
+        }
+
+        // 2. Thank You / Closing
+        if ($this->isThankYou($normalized)) {
+            return [
+                'success' => true,
+                'reply' => 'Sama-sama! Senang bisa membantu kamu. Jangan ragu bertanya lagi jika butuh rekomendasi aksesoris atau informasi lainnya ya! Selamat berbelanja di nnasa_ca 💕',
+                'products' => [],
+                'suggestions' => ['Lihat Semua Produk', 'Promo & Diskon', 'Hubungi WhatsApp'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // 3. Identity / Role Query
+        if ($this->isIdentityQuery($normalized)) {
+            return [
+                'success' => true,
+                'reply' => "Aku adalah **NNasa AI Assistant**, asisten virtual cerdas terintegrasi resmi dari toko aksesoris online **nnasa_ca**.\n\n"
+                         . "Aku terhubung langsung dengan basis data sistem secara real-time untuk:\n"
+                         . "💎 Menjawab ketersediaan stok fisik & varian produk\n"
+                         . "💰 Menghitung harga diskon & voucher promo\n"
+                         . "📦 Melacak status pesanan & nomor resi ekspedisi\n"
+                         . "🧭 Memandu penggunaan seluruh fitur website pelanggan & panel admin\n"
+                         . "📊 Menyajikan ringkasan statistik produk akurat tanpa halusinasi.",
+                'products' => [],
+                'suggestions' => ['📊 Ringkasan Produk', '💎 Aksesoris Murah', '📦 Cek Stok Jedai', '💡 Panduan Fitur'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // 4. Platform Feature Search & Navigation Guide (di mana halaman..., fitur apa...)
+        $featureMatch = $this->handleFeatureSearch($normalized, $role);
+        if ($featureMatch !== null) {
+            return $featureMatch;
+        }
+
+        // 5. Multi-Turn Drill-Down / Follow-Up (Section 6)
+        // e.g. "Tampilkan semuanya", "Yang stoknya habis saja", "Berapa harganya?", "Kalau warna hitam ada?"
+        if ($this->isDrillDownOrFollowUp($normalized, $context)) {
+            $drillDownResult = $this->handleDrillDownOrFollowUp($normalized, $context, $isAdmin);
+            if ($drillDownResult !== null) {
+                return $drillDownResult;
+            }
+        }
+
+        // 6. Order Lookup (e.g. "cek pesanan NNA-20261014-0001", "status pesanan saya")
+        if ($this->isOrderInquiry($normalized)) {
+            return $this->handleOrderInquiry($original, $normalized, $context, $user);
+        }
+
+        // 7. Admin Revenue & Sales Inquiries (RBAC Guarded)
+        if ($this->isRevenueOrSalesQuery($normalized)) {
+            return $this->handleRevenueQuery($normalized, $context, $user);
+        }
+
+        // 7. Product Summary / Ringkasan Produk (Section 5)
+        if ($this->isProductSummaryQuery($normalized)) {
+            return $this->handleProductSummaryQuery($context);
+        }
+
+        // 8. Active / Inactive Products Count & List
+        if ($this->isActiveOrInactiveQuery($normalized)) {
+            return $this->handleActiveOrInactiveQuery($normalized, $context);
+        }
+
+        // 9. Low Stock / Out of Stock Query
+        if ($this->isLowOrOutOfStockQuery($normalized)) {
+            return $this->handleLowOrOutOfStockQuery($normalized, $context);
+        }
+
+        // 10. Most / Least Stocked Products (Stock Extremes)
+        if ($this->isStockExtremesQuery($normalized)) {
+            return $this->handleStockExtremesQuery($normalized, $context);
+        }
+
+        // 11. Total Stock Units Query
+        if ($this->isTotalUnitsStockQuery($normalized)) {
+            return $this->handleTotalUnitsStockQuery($context);
+        }
+
+        // 12. Incomplete Data Audit Query
+        if ($this->isIncompleteDataQuery($normalized)) {
+            return $this->handleIncompleteDataQuery($context, $isAdmin);
+        }
+
+        // 13. Category Breakdown Query
+        if ($this->isCategoryBreakdownQuery($normalized)) {
+            return $this->handleCategoryBreakdownQuery($context);
+        }
+
+        // 14. Specific Product Stock Check
+        if ($this->isSpecificStockQuery($normalized)) {
+            $stockResult = $this->handleSpecificStockQuery($normalized, $context);
+            if ($stockResult !== null) {
+                return $stockResult;
+            }
+        }
+
+        // 15. Price Filter Query ("murah", "di bawah 50rb", etc.)
+        if ($this->isPriceFilterQuery($normalized)) {
+            return $this->handlePriceFilterQuery($normalized, $context);
+        }
+
+        // 16. Promo & Voucher Inquiries (NNASANEW)
+        if ($this->isCouponQuery($normalized)) {
+            return $this->handleCouponQuery($normalized, $context);
+        }
+
+        // 17. Recommendations / Best Sellers / New Arrivals
+        if ($this->isRecommendationQuery($normalized)) {
+            return $this->handleRecommendationQuery($normalized, $context);
+        }
+
+        // 18. Category Matching
+        $categoryMatch = $this->matchCategory($normalized);
+        if ($categoryMatch !== null) {
+            return $this->handleCategoryQuery($categoryMatch, $normalized, $context);
+        }
+
+        // 19. Platform Feature Search & Navigation Guide
+        $featureMatch = $this->handleFeatureSearch($normalized, $role);
+        if ($featureMatch !== null) {
+            return $featureMatch;
+        }
+
+        // 20. General Product Search against Database
+        $searchResult = $this->handleGeneralProductSearch($normalized, $context);
+        if ($searchResult !== null) {
+            return $searchResult;
+        }
+
+        // 21. Website Guide fallback (cara beli, bayar, dll.)
+        if ($this->isWebsiteGuideQuery($normalized)) {
+            return $this->handleWebsiteGuideQuery($normalized, $context);
+        }
+
+        // Fallback with suggested actions
+        return [
+            'success' => true,
+            'reply' => "Maaf, aku belum menemukan informasi spesifik untuk pertanyaan kamu. Kamu bisa menanyakan koleksi aksesoris kami (seperti jepit rambut, scrunchie, kalung, gelang, anting, cincin), mengecek ketersediaan stok riil, status pesanan, ringkasan produk, atau panduan fitur toko ya. Ada yang ingin kamu cari? 🌸",
+            'products' => [],
+            'suggestions' => $this->getDefaultSuggestions($role),
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Multi-Turn Drill-Down / Follow-Up Handler
+     */
+    private function handleDrillDownOrFollowUp(string $normalized, array &$context, bool $isAdmin = false): ?array {
+        $lastTopic = $context['last_topic'] ?? null;
+        $lastProducts = $context['last_products'] ?? [];
+        $lastFocused = $context['focused_product'] ?? ($lastProducts[0] ?? null);
+
+        // A. Drill-down: "Tampilkan semuanya" / "Lihat semua daftarnya"
+        if (preg_match('/\b(tampilkan semuanya|tampilkan semua|lihat semuanya|lihat semua|semuanya|daftarnya|listnya)\b/i', $normalized) && !str_contains($normalized, 'murah')) {
+            if ($lastTopic === 'active_products' || ($context['last_filter']['status'] ?? '') === 'active') {
+                $products = $this->productService->getProductsByStatus('active', 20);
+                $context['last_products'] = $products;
+                $context['last_topic'] = 'product_list';
+
+                return [
+                    'success' => true,
+                    'reply' => "Berikut adalah daftar lengkap produk berstatus **Aktif** yang siap dibeli di nnasa_ca:",
+                    'table' => $this->buildProductsTable($products),
+                    'products' => array_slice($products, 0, 4),
+                    'suggestions' => ['Yang stoknya habis saja', 'Yang stoknya menipis', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            }
+
+            if ($lastTopic === 'inactive_products' || ($context['last_filter']['status'] ?? '') === 'inactive') {
+                $products = $this->productService->getProductsByStatus('inactive', 20);
+                $context['last_products'] = $products;
+                $context['last_topic'] = 'product_list';
+
+                if (empty($products)) {
+                    return [
+                        'success' => true,
+                        'reply' => "Saat ini tidak ada produk yang berstatus nonaktif (draft/archived) di database. Seluruh produk berstatus aktif.",
+                        'products' => [],
+                        'suggestions' => ['Produk Aktif', '📊 Ringkasan Produk'],
+                        'provider' => 'builtin'
+                    ];
+                }
+
+                return [
+                    'success' => true,
+                    'reply' => "Berikut adalah daftar produk yang berstatus **Nonaktif (Draft / Diarsipkan)**:",
+                    'table' => $this->buildProductsTable($products),
+                    'products' => [],
+                    'suggestions' => ['Produk Aktif', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            }
+        }
+
+        // B. Drill-down: "Yang stoknya habis saja" / "yang habis"
+        if (preg_match('/\b(yang|hanya)?\s*(stok(nya)?\s*habis|habis\s*saja|kosong)\b/i', $normalized)) {
+            $products = $this->productService->getProductsByStatus('out_of_stock', 20);
+            $context['last_products'] = $products;
+            $context['last_topic'] = 'out_of_stock_list';
+
+            if (empty($products)) {
+                return [
+                    'success' => true,
+                    'reply' => "Tidak ada produk aktif yang kehabisan stok! Seluruh produk kami saat ini tersedia dan siap dipesan. 🎉",
+                    'products' => [],
+                    'suggestions' => ['Produk Aktif', 'Aksesoris Murah', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            }
+
+            return [
+                'success' => true,
+                'reply' => "Berikut adalah produk yang stoknya saat ini **habis (0 unit)**:",
+                'table' => $this->buildProductsTable($products),
+                'products' => array_slice($products, 0, 4),
+                'suggestions' => ['Yang stoknya menipis', 'Produk Aktif'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // C. Price inquiry on last product ("Berapa harganya?")
+        if (preg_match('/\b(berapa|brp)\s*(harga(nya)?|biaya(nya)?)\b/i', $normalized) ||
+            preg_match('/\b(harga(nya)?)\s*(berapa|brp)\b/i', $normalized) ||
+            $normalized === 'harganya' || $normalized === 'berapa harganya') {
+            
+            if ($lastFocused) {
+                $p = $this->productService->getProductStock($lastFocused['name']);
+                if ($p) {
+                    $context['focused_product'] = $p;
+                    $priceText = $p['has_discount']
+                        ? "Harga diskon untuk **{$p['name']}** adalah **{$p['price_formatted']}** (harga normal: ~~{$p['original_price_formatted']}~~, hemat {$p['discount_percent']}%)."
+                        : "Harga untuk **{$p['name']}** adalah **{$p['price_formatted']}**.";
+
+                    if (!empty($p['variants'])) {
+                        $variantTexts = [];
+                        foreach ($p['variants'] as $v) {
+                            $adj = (float)$v['price_adjustment'];
+                            $adjText = $adj > 0 ? " (+ " . format_rupiah($adj) . ")" : "";
+                            $variantTexts[] = "{$v['variant_name']} **{$v['variant_value']}**: stok {$v['stock']} pcs{$adjText}";
+                        }
+                        $priceText .= "\n\nPilihan varian:\n- " . implode("\n- ", $variantTexts);
+                    }
+
+                    return [
+                        'success' => true,
+                        'reply' => $priceText,
+                        'products' => [$p],
+                        'suggestions' => ['Beli Sekarang', 'Cek Stok Produk Ini', 'Cari Aksesoris Lain'],
+                        'provider' => 'builtin'
+                    ];
+                }
+            }
+        }
+
+        // D. Color / Variant refinement ("Kalau yang warna hitam ada?")
+        if (preg_match('/\b(warna|pilihan|motif|model|varian)\b/i', $normalized) ||
+            preg_match('/\b(hitam|putih|rose gold|gold|silver|lilac|pastel|beige|pink|sage|nude)\b/i', $normalized)) {
+
+            $colors = [
+                'hitam' => ['hitam', 'black', 'onyx'],
+                'putih' => ['putih', 'white', 'pearl'],
+                'rose gold' => ['rose gold', 'rosegold'],
+                'gold' => ['gold', 'emas'],
+                'silver' => ['silver', 'perak'],
+                'pink' => ['pink', 'blush', 'dusty pink'],
+                'lilac' => ['lilac', 'ungu'],
+                'nude' => ['nude', 'beige', 'champagne'],
+                'sage' => ['sage', 'hijau']
+            ];
+
+            $matchedColorKey = null;
+            foreach ($colors as $key => $synonyms) {
+                foreach ($synonyms as $syn) {
+                    if (str_contains($normalized, $syn)) {
+                        $matchedColorKey = $key;
+                        break 2;
+                    }
+                }
+            }
+
+            if ($matchedColorKey !== null) {
+                $foundInLast = [];
+                foreach ($lastProducts as $lp) {
+                    $detail = $this->productService->getProductStock($lp['name']);
+                    if ($detail && !empty($detail['variants'])) {
+                        foreach ($detail['variants'] as $v) {
+                            foreach ($colors[$matchedColorKey] as $syn) {
+                                if (stripos($v['variant_value'], $syn) !== false) {
+                                    $detail['matched_variant'] = $v;
+                                    $foundInLast[] = $detail;
+                                    break 2;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (empty($foundInLast)) {
+                    $foundInLast = $this->searchProductsByColor($matchedColorKey, $colors[$matchedColorKey]);
+                }
+
+                if (!empty($foundInLast)) {
+                    $context['last_products'] = $foundInLast;
+                    $context['focused_product'] = $foundInLast[0];
+                    $pName = $foundInLast[0]['name'];
+                    $vName = $foundInLast[0]['matched_variant']['variant_value'] ?? $matchedColorKey;
+                    $vStock = $foundInLast[0]['matched_variant']['stock'] ?? $foundInLast[0]['stock'];
+                    $vPrice = $foundInLast[0]['price_formatted'];
+
+                    $reply = "Ada! Untuk varian warna **{$vName}**, tersedia pada **{$pName}** seharga **{$vPrice}** dengan stok tersedia **{$vStock} pcs**.";
+                    if (count($foundInLast) > 1) {
+                        $reply .= " Kami juga memiliki opsi aksesoris berwarna senada lainnya:";
+                    }
+
+                    return [
+                        'success' => true,
+                        'reply' => $reply,
+                        'products' => array_slice($foundInLast, 0, 3),
+                        'suggestions' => ['Berapa Harganya?', 'Lihat Detail Produk', 'Aksesoris Lainnya'],
+                        'provider' => 'builtin'
+                    ];
+                } else {
+                    return [
+                        'success' => true,
+                        'reply' => "Mohon maaf, saat ini kami belum memiliki varian warna {$matchedColorKey} untuk koleksi tersebut. Warna yang tersedia di butik kami meliputi Rose Gold, Pearl White, Champagne Beige, dan Blush Pink. Mau aku carikan warna lain? 🌸",
+                        'products' => [],
+                        'suggestions' => ['Warna Rose Gold', 'Warna Pearl White', 'Koleksi Terpopuler'],
+                        'provider' => 'builtin'
+                    ];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Product Summary Handler (Section 5)
+     */
+    private function handleProductSummaryQuery(array &$context): array {
+        $summary = $this->productService->getSummary();
+        $reply = $this->productService->formatSummaryText($summary);
+
+        $context['last_topic'] = 'product_summary';
+        $context['last_summary'] = $summary;
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'stats_card' => [
+                ['label' => 'Total Produk', 'value' => $summary['total_products'] . ' Model', 'icon' => 'bi-box-seam', 'color' => 'primary'],
+                ['label' => 'Produk Aktif', 'value' => $summary['active_products'] . ' Model', 'icon' => 'bi-check-circle', 'color' => 'success'],
+                ['label' => 'Stok Menipis', 'value' => $summary['low_stock_products'] . ' Model', 'icon' => 'bi-exclamation-triangle', 'color' => 'warning'],
+                ['label' => 'Stok Fisik', 'value' => $summary['total_stock_units'] . ' Unit', 'icon' => 'bi-boxes', 'color' => 'info']
+            ],
+            'products' => [],
+            'suggestions' => ['✨ Produk Aktif', '⚠️ Stok Menipis', '❌ Stok Habis', '📦 Total Stok Fisik'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Active or Inactive products handler
+     */
+    private function handleActiveOrInactiveQuery(string $normalized, array &$context): array {
+        $isInactive = str_contains($normalized, 'tidak aktif') || str_contains($normalized, 'nonaktif') || str_contains($normalized, 'draft') || str_contains($normalized, 'arsip');
+
+        if ($isInactive) {
+            $summary = $this->productService->getSummary();
+            $inactiveCount = $summary['inactive_products'];
+            $context['last_topic'] = 'inactive_products';
+            $context['last_filter'] = ['status' => 'inactive'];
+
+            if ($inactiveCount === 0) {
+                return [
+                    'success' => true,
+                    'reply' => "Berdasarkan data terkini di database toko:\n\n- Jumlah produk **tidak aktif / nonaktif**: **0 produk**\n\nSaat ini tidak ada produk yang berstatus nonaktif (draft / arsip) di database. Seluruh {$summary['total_products']} model produk yang terdaftar di sistem saat ini berstatus **Aktif** dan siap dipesan.",
+                    'products' => [],
+                    'suggestions' => ['✨ Produk Aktif', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            } else {
+                $products = $this->productService->getProductsByStatus('inactive', 10);
+                return [
+                    'success' => true,
+                    'reply' => "Terdapat **{$inactiveCount} produk** yang berstatus nonaktif/draft di database.",
+                    'table' => $this->buildProductsTable($products),
+                    'products' => [],
+                    'suggestions' => ['Tampilkan semuanya', 'Produk Aktif'],
+                    'provider' => 'builtin'
+                ];
+            }
+        } else {
+            // Active products query
+            $summary = $this->productService->getSummary();
+            $activeCount = $summary['active_products'];
+            $context['last_topic'] = 'active_products';
+            $context['last_filter'] = ['status' => 'active'];
+
+            $wantsList = str_contains($normalized, 'tampilkan') || str_contains($normalized, 'daftar') || str_contains($normalized, 'lihat') || str_contains($normalized, 'list');
+
+            if ($wantsList) {
+                $products = $this->productService->getProductsByStatus('active', 20);
+                return [
+                    'success' => true,
+                    'reply' => "Berikut adalah daftar produk berstatus **Aktif** yang tersedia di database nnasa_ca ({$activeCount} model produk):",
+                    'table' => $this->buildProductsTable($products),
+                    'products' => array_slice($products, 0, 4),
+                    'suggestions' => ['Yang stoknya habis saja', 'Yang stoknya menipis', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            }
+
+            return [
+                'success' => true,
+                'reply' => "Berdasarkan data terbaru di database toko:\n\n- Jumlah produk **aktif**: **{$activeCount} produk** (dengan total {$summary['total_stock_units']} unit stok fisik tersedia).\n\nKamu bisa mengetik **'Tampilkan semuanya'** untuk melihat daftar lengkap produk aktif dalam bentuk tabel!",
+                'products' => [],
+                'suggestions' => ['Tampilkan semuanya', 'Yang stoknya habis saja', 'Yang stoknya menipis', '📊 Ringkasan Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+    }
+
+    /**
+     * Low stock or out-of-stock query
+     */
+    private function handleLowOrOutOfStockQuery(string $normalized, array &$context): array {
+        $isOutOfStock = str_contains($normalized, 'habis') || str_contains($normalized, 'kosong');
+
+        if ($isOutOfStock) {
+            $products = $this->productService->getProductsByStatus('out_of_stock', 10);
+            $count = count($products);
+            $context['last_topic'] = 'out_of_stock_list';
+
+            if ($count === 0) {
+                return [
+                    'success' => true,
+                    'reply' => "Kabar baik! Saat ini **tidak ada produk aktif yang stoknya habis (0 produk)** di database. Seluruh katalog aksesoris kami masih memiliki stok dan siap dibeli langsung! 🎉",
+                    'products' => [],
+                    'suggestions' => ['Produk Aktif', '⚠️ Stok Menipis', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            } else {
+                return [
+                    'success' => true,
+                    'reply' => "Terdapat **{$count} produk** yang stoknya saat ini habis:",
+                    'table' => $this->buildProductsTable($products),
+                    'products' => $products,
+                    'suggestions' => ['Produk Aktif', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            }
+        } else {
+            // Low stock with dynamic threshold extraction
+            $threshold = 5;
+            $strictLess = false;
+            if (preg_match('/(?:kurang dari|di bawah|dibawah|<)\s*([0-9]+)/i', $normalized, $matches)) {
+                $threshold = (int)$matches[1];
+                $strictLess = true;
+            } elseif (preg_match('/(?:sisa|menipis)\s*([0-9]+)/i', $normalized, $matches)) {
+                $threshold = (int)$matches[1];
+            }
+
+            if ($strictLess) {
+                $stmt = $this->db->prepare("
+                    SELECT p.*, COALESCE(c.name, 'Aksesoris') AS category_name
+                    FROM products p
+                    LEFT JOIN categories c ON p.category_id = c.id
+                    WHERE p.status = 'active' AND p.stock < ?
+                    ORDER BY p.stock ASC
+                ");
+                $stmt->execute([$threshold]);
+                $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($products as &$p) {
+                    $p['price_formatted'] = format_rupiah((float)$p['price']);
+                }
+            } else {
+                $products = $this->productService->getProductsByStatus('low_stock', 15);
+            }
+            $count = count($products);
+            $context['last_topic'] = 'low_stock_list';
+
+            if ($count === 0) {
+                $comp = $strictLess ? "kurang dari {$threshold} unit" : "menipis (<= {$threshold} unit)";
+                return [
+                    'success' => true,
+                    'reply' => "Berdasarkan data terkini di database toko, saat ini **tidak ada produk aktif yang stoknya {$comp}**. Seluruh stok aksesoris berada dalam kondisi aman! ✨",
+                    'products' => [],
+                    'suggestions' => ['Produk Aktif', '📊 Ringkasan Produk'],
+                    'provider' => 'builtin'
+                ];
+            }
+
+            $names = [];
+            foreach ($products as $p) {
+                $names[] = "**{$p['name']}** (SKU: `{$p['sku']}`, sisa **{$p['stock']} unit**, harga: {$p['price_formatted']})";
+            }
+
+            $compWord = $strictLess ? "kurang dari {$threshold} unit" : "<= {$threshold} unit";
+            $reply = "Berdasarkan data terkini di database toko, terdapat **{$count} produk dengan stok {$compWord}**:\n\n- "
+                   . implode("\n- ", $names);
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'table' => $this->buildProductsTable($products),
+                'products' => $products,
+                'suggestions' => ['Produk Aktif', 'Total Stok Fisik', '📊 Ringkasan Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+    }
+
+    /**
+     * Stock Extremes (Most / Least Stocked Products)
+     */
+    private function handleStockExtremesQuery(string $normalized, array &$context): array {
+        $extremes = $this->productService->getStockExtremes();
+
+        if (str_contains($normalized, 'sedikit') || str_contains($normalized, 'paling kecil') || str_contains($normalized, 'terendah')) {
+            $p = $extremes['least_stocked'];
+            if (!$p) {
+                return ['success' => true, 'reply' => 'Belum ada data produk tersedia.', 'products' => []];
+            }
+            $reply = "Produk dengan jumlah stok paling sedikit di toko adalah **{$p['name']}** (SKU: `{$p['sku']}`) dengan sisa stok **{$p['stock']} unit** seharga **{$p['price_formatted']}**.";
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [$p],
+                'suggestions' => ['Produk Stok Terbanyak', '⚠️ Stok Menipis', '📊 Ringkasan Produk'],
+                'provider' => 'builtin'
+            ];
+        } else {
+            // Most stocked
+            $p = $extremes['most_stocked'];
+            if (!$p) {
+                return ['success' => true, 'reply' => 'Belum ada data produk tersedia.', 'products' => []];
+            }
+            $reply = "Produk dengan jumlah stok paling banyak di toko adalah **{$p['name']}** (SKU: `{$p['sku']}`) dengan ketersediaan **{$p['stock']} unit** seharga **{$p['price_formatted']}**.";
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [$p],
+                'suggestions' => ['Produk Stok Paling Sedikit', '✨ Produk Aktif', '📊 Ringkasan Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+    }
+
+    /**
+     * Total stock units query
+     */
+    private function handleTotalUnitsStockQuery(array &$context): array {
+        $summary = $this->productService->getSummary();
+        $reply = "Berdasarkan audit inventaris gudang toko **nnasa_ca**:\n\n"
+               . "📦 **Total Unit Stok Fisik Keseluruhan**: **{$summary['total_stock_units']} unit**\n"
+               . "✨ **Total Model/Jenis Produk**: **{$summary['total_products']} jenis aksesoris**\n"
+               . "🏷️ **Kategori Aktif**: **{$summary['total_categories']} kategori**\n\n"
+               . "Seluruh unit ini tersebar pada jepit rambut, scrunchie, kalung, gelang, cincin, anting, dan gift box bundling.";
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'stats_card' => [
+                ['label' => 'Total Stok Fisik', 'value' => $summary['total_stock_units'] . ' Pcs', 'icon' => 'bi-boxes', 'color' => 'success'],
+                ['label' => 'Jenis Produk', 'value' => $summary['total_products'] . ' Model', 'icon' => 'bi-box-seam', 'color' => 'primary']
+            ],
+            'products' => [],
+            'suggestions' => ['📊 Ringkasan Produk', 'Produk Stok Terbanyak', 'Produk Terlaris'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Incomplete product data check
+     */
+    private function handleIncompleteDataQuery(array &$context, bool $isAdmin = false): array {
+        $incomplete = $this->productService->getIncompleteProducts();
+        $count = count($incomplete);
+
+        if ($count === 0) {
+            $reply = "Seluruh data produk di database telah terisi dengan **lengkap 100%**! Tidak ada produk yang kehilangan deskripsi, foto utama, maupun kategori. Katalog dalam kondisi prima. ✨";
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['📊 Ringkasan Produk', '✨ Produk Aktif'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        $lines = [];
+        foreach ($incomplete as $item) {
+            $lines[] = "- **{$item['name']}** (SKU: `{$item['sku']}`): {$item['issue']}";
+        }
+
+        $reply = "Ditemukan **{$count} produk** yang datanya belum lengkap di database:\n\n" . implode("\n", $lines);
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'products' => [],
+            'suggestions' => ['Kelola Produk Admin', '📊 Ringkasan Produk'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Category breakdown query
+     */
+    private function handleCategoryBreakdownQuery(array &$context): array {
+        $totalCategories = (int)$this->db->query("SELECT COUNT(*) FROM categories")->fetchColumn();
+        $cats = $this->productService->getCategoryBreakdown();
+
+        $lines = [];
+        foreach ($cats as $c) {
+            $lines[] = "- **{$c['category_name']}**: **{$c['total_products']} model** ({$c['total_units']} unit stok)";
+        }
+
+        $reply = "Berdasarkan data terkini di database toko, saat ini terdapat total **{$totalCategories} kategori** yang terdaftar di nnasa_ca.\n\n"
+               . "Berikut rincian ketersediaan produk per kategori:\n"
+               . implode("\n", $lines);
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'products' => [],
+            'suggestions' => ['Kalung Rose Gold', 'Aksesoris Rambut', 'Paket Bundling'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Order Lookup / Customer Orders inquiry
+     */
+    private function handleOrderInquiry(string $original, string $normalized, array &$context, ?array $user): array {
+        $userId = $user['id'] ?? null;
+        $role = $user['role'] ?? 'public';
+        $isAdmin = ($role === 'admin' || $role === 'staff');
+
+        // Check if specific order number is provided (e.g. NNA-20261014-0001)
+        if (preg_match('/NNA-[0-9]{8}-[A-Za-z0-9]+/i', $original, $matches)) {
+            $orderNumber = strtoupper($matches[0]);
+            $order = $this->orderService->lookupOrder($orderNumber, $userId, $isAdmin);
+
+            if (!$order) {
+                return [
+                    'success' => true,
+                    'reply' => "Pesanan dengan nomor **{$orderNumber}** tidak ditemukan di sistem, atau kamu tidak memiliki hak akses untuk melihat pesanan tersebut.",
+                    'products' => [],
+                    'suggestions' => ['Lacak Pesanan', 'Bantuan FAQ'],
+                    'provider' => 'builtin'
+                ];
+            }
+
+            $statusLabels = [
+                'pending' => '⏳ Menunggu Pembayaran',
+                'processing' => '📦 Sedang Diproses Penjual',
+                'shipped' => '🚚 Dalam Pengiriman',
+                'completed' => '✅ Selesai Diterima',
+                'cancelled' => '❌ Dibatalkan'
+            ];
+            $stText = $statusLabels[$order['order_status']] ?? $order['order_status'];
+
+            $reply = "Informasi Pesanan **{$order['order_number']}**:\n\n"
+                   . "- Status Pesanan: **{$stText}**\n"
+                   . "- Status Pembayaran: **" . strtoupper($order['payment_status']) . "**\n"
+                   . "- Total Belanja: **" . format_rupiah((float)$order['total_amount']) . "**\n"
+                   . "- Tanggal Pemesanan: " . date('d M Y, H:i', strtotime($order['created_at'])) . " WIB\n";
+
+            if (!empty($order['shipment']['tracking_number'])) {
+                $reply .= "- Kurir Pengiriman: **{$order['shipment']['courier']}** (No. Resi: `{$order['shipment']['tracking_number']}`)\n";
+            }
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Lacak Resi Pengiriman', 'Pesanan Saya'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // If asking for personal orders
+        if ($isAdmin) {
+            // Khusus Admin / Staff: Query data operasional pesanan toko secara real-time
+            $pendingOrders = (int)$this->db->query("SELECT COUNT(*) FROM orders WHERE order_status = 'pending'")->fetchColumn();
+            $processingOrders = (int)$this->db->query("SELECT COUNT(*) FROM orders WHERE order_status = 'processing'")->fetchColumn();
+            $completedOrders = (int)$this->db->query("SELECT COUNT(*) FROM orders WHERE order_status IN ('completed', 'delivered')")->fetchColumn();
+            $lowStock = (int)$this->db->query("SELECT COUNT(*) FROM products WHERE stock <= 5 AND status = 'active'")->fetchColumn();
+
+            // Coba tanyakan ke LLM Provider aktif (Gemini) yang sudah ter-grounding data DB
+            $llmResponse = $this->queryLLMProvider($original, $normalized, $context, $user);
+            if ($llmResponse !== null && !empty($llmResponse['reply'])) {
+                return $llmResponse;
+            }
+
+            // Fallback deterministik cerdas jika API sedang nonaktif/offline
+            $adminName = $user['name'] ?? 'Admin';
+            if (str_contains($normalized, 'belum bayar') || str_contains($normalized, 'pending')) {
+                $reply = "Saat ini terdapat **{$pendingOrders} pesanan** yang belum dibayar, Admin {$adminName}.";
+            } elseif (str_contains($normalized, 'proses') || str_contains($normalized, 'processing')) {
+                $reply = "Saat ini terdapat **{$processingOrders} pesanan** yang perlu diproses, Admin {$adminName}.";
+            } else {
+                $reply = "Halo Admin {$adminName}! Data pesanan toko saat ini:\n\n"
+                       . "• ⏳ **Pesanan Belum Bayar**: **{$pendingOrders} pesanan**\n"
+                       . "• 📦 **Pesanan Perlu Diproses**: **{$processingOrders} pesanan**\n"
+                       . "• ✅ **Pesanan Selesai**: **{$completedOrders} pesanan**\n"
+                       . "• ⚠️ **Stok Menipis (≤ 5 pcs)**: **{$lowStock} produk**\n\n"
+                       . "Kamu dapat mengelolanya langsung di menu Manajemen Pesanan.";
+            }
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Pesanan Perlu Diproses', 'Pesanan Belum Bayar', '⚠️ Stok Menipis', '📊 Ringkasan Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // If asking for personal orders (Customer biasa)
+        if ($userId) {
+            $summary = $this->orderService->getUserOrdersSummary($userId);
+            if ($summary['total_orders'] === 0) {
+                return [
+                    'success' => true,
+                    'reply' => "Kamu belum memiliki riwayat pesanan di nnasa_ca. Yuk jelajahi katalog aksesoris cantik kami dan nikmati diskon spesial!",
+                    'products' => [],
+                    'suggestions' => ['Katalog Semua Produk', 'Promo & Diskon'],
+                    'provider' => 'builtin'
+                ];
+            }
+
+            $reply = "Kamu memiliki total **{$summary['total_orders']} pesanan** di nnasa_ca.\n";
+            if ($summary['latest_order']) {
+                $lo = $summary['latest_order'];
+                $reply .= "Pesanan terakhir kamu: **{$lo['order_number']}** (Status: **" . strtoupper($lo['order_status']) . "**, Total: " . format_rupiah((float)$lo['total_amount']) . ").\n\n";
+            }
+            $reply .= "Kamu bisa memantau posisi pengiriman paket secara real-time di halaman [Lacak Pesanan]({$this->getBaseUrl()}tracking.php) atau melihat rincian di [Pesanan Saya]({$this->getBaseUrl()}orders.php).";
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Buka Pesanan Saya', 'Lacak Pesanan', 'Katalog Produk'],
+                'provider' => 'builtin'
+            ];
+        } else {
+            return [
+                'success' => true,
+                'reply' => "Untuk melacak pengiriman paket atau mengecek status pesanan, kamu bisa langsung memasukkan nomor pesanan kamu (contoh: `NNA-20261014-0001`) di halaman [Lacak Pesanan]({$this->getBaseUrl()}tracking.php) atau [Login ke Akun]({$this->getBaseUrl()}login.php).",
+                'products' => [],
+                'suggestions' => ['Lacak Pesanan', 'Login Akun', 'Hubungi WhatsApp'],
+                'provider' => 'builtin'
+            ];
+        }
+    }
+
+    /**
+     * Admin Revenue & Financial Inquiries (RBAC Guarded)
+     */
+    private function handleRevenueQuery(string $normalized, array &$context, ?array $user): array {
+        $role = $user['role'] ?? 'public';
+
+        if ($role !== 'admin' && $role !== 'staff') {
+            return [
+                'success' => true,
+                'reply' => "🔒 **Akses Dibatasi**: Informasi omzet, rincian keuangan, dan analitik pendapatan toko bersifat rahasia dan hanya dapat diakses oleh Administrator/Staf toko yang telah login ke Panel Admin. Silakan tanyakan informasi produk, harga, atau stok ya! 🌸",
+                'products' => [],
+                'suggestions' => ['💎 Aksesoris Murah', '📊 Ringkasan Produk', 'Katalog Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Check timeframe: Minggu Ini vs Hari Ini vs Bulan Ini vs Lifetime
+        $isWeek = str_contains($normalized, 'minggu') || str_contains($normalized, 'pekan') || str_contains($normalized, 'week');
+        $isToday = str_contains($normalized, 'hari ini') || str_contains($normalized, 'today');
+        $isMonth = str_contains($normalized, 'bulan') || str_contains($normalized, 'month');
+
+        if ($isWeek || $isToday || $isMonth) {
+            $timeframeLabel = 'Minggu Ini (7 Hari Terakhir)';
+            $dateCondition = "created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)";
+
+            if ($isToday) {
+                $timeframeLabel = 'Hari Ini (' . date('d M Y') . ')';
+                $dateCondition = "DATE(created_at) = CURDATE()";
+            } elseif ($isMonth) {
+                $timeframeLabel = 'Bulan Ini (' . date('F Y') . ')';
+                $dateCondition = "created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)";
+            }
+
+            $stmtSales = $this->db->query("
+                SELECT 
+                    COUNT(*) AS total_orders,
+                    COALESCE(SUM(total_amount), 0) AS total_amount,
+                    COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN total_amount ELSE 0 END), 0) AS paid_revenue,
+                    SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END) AS paid_orders,
+                    SUM(CASE WHEN order_status = 'completed' THEN 1 ELSE 0 END) AS completed_orders,
+                    SUM(CASE WHEN order_status = 'processing' THEN 1 ELSE 0 END) AS processing_orders,
+                    SUM(CASE WHEN order_status = 'shipped' THEN 1 ELSE 0 END) AS shipped_orders,
+                    SUM(CASE WHEN order_status = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
+                    SUM(CASE WHEN order_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders
+                FROM orders
+                WHERE {$dateCondition}
+            ");
+            $sales = $stmtSales->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            // Top items in timeframe
+            $stmtTop = $this->db->query("
+                SELECT oi.product_name_snapshot, SUM(oi.quantity) AS qty_sold, SUM(oi.subtotal) AS total_val
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                WHERE o.{$dateCondition} AND o.payment_status = 'paid'
+                GROUP BY oi.product_name_snapshot
+                ORDER BY qty_sold DESC
+                LIMIT 5
+            ");
+            $topItems = $stmtTop->fetchAll(PDO::FETCH_ASSOC);
+
+            $paidRevFormatted = format_rupiah((float)($sales['paid_revenue'] ?? 0));
+            $reply = "📊 **Ringkasan Performa Penjualan — {$timeframeLabel}**:\n\n"
+                   . "- **Total Pendapatan Lunas**: **{$paidRevFormatted}**\n"
+                   . "- **Total Pesanan Masuk**: **" . ($sales['total_orders'] ?? 0) . " pesanan**\n"
+                   . "  • Lunas / Terbayar: " . ($sales['paid_orders'] ?? 0) . " pesanan\n"
+                   . "  • Pesanan Selesai: " . ($sales['completed_orders'] ?? 0) . "\n"
+                   . "  • Sedang Diproses: " . ($sales['processing_orders'] ?? 0) . "\n"
+                   . "  • Dalam Pengiriman: " . ($sales['shipped_orders'] ?? 0) . "\n"
+                   . "  • Menunggu Pembayaran: " . ($sales['pending_orders'] ?? 0) . "\n"
+                   . "  • Dibatalkan: " . ($sales['cancelled_orders'] ?? 0) . "\n";
+
+            if (!empty($topItems)) {
+                $reply .= "\n🔥 **Produk Terlaris Periode Ini**:\n";
+                foreach ($topItems as $idx => $ti) {
+                    $valFormatted = format_rupiah((float)$ti['total_val']);
+                    $reply .= ($idx + 1) . ". **{$ti['product_name_snapshot']}** — terjual **{$ti['qty_sold']} pcs** (Omzet: {$valFormatted})\n";
+                }
+            }
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'stats_card' => [
+                    ['label' => 'Pendapatan ' . ($isToday ? 'Hari Ini' : ($isWeek ? 'Minggu Ini' : 'Bulan Ini')), 'value' => $paidRevFormatted, 'icon' => 'bi-cash-coin', 'color' => 'success'],
+                    ['label' => 'Pesanan Diproses', 'value' => ($sales['processing_orders'] ?? 0) . ' Order', 'icon' => 'bi-hourglass-split', 'color' => 'warning'],
+                    ['label' => 'Pesanan Selesai', 'value' => ($sales['completed_orders'] ?? 0) . ' Order', 'icon' => 'bi-check2-circle', 'color' => 'info']
+                ],
+                'products' => [],
+                'suggestions' => ['Penjualan Hari Ini', 'Total Omzet Keseluruhan', '⚠️ Stok Menipis'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Admin Access Granted (Lifetime)
+        $rev = $this->orderService->getAdminRevenueSummary();
+
+        $reply = "📊 **Ringkasan Keuangan & Pesanan Toko (Khusus Admin)**:\n\n"
+               . "- **Total Omzet Valid**: **{$rev['total_revenue_formatted']}**\n"
+               . "- **Omzet Lunas Hari Ini**: **{$rev['today_revenue_formatted']}**\n"
+               . "- **Total Semua Pesanan**: **{$rev['total_orders']} pesanan**\n"
+               . "  • Menunggu Pembayaran: {$rev['pending_orders']}\n"
+               . "  • Sedang Diproses: {$rev['processing_orders']}\n"
+               . "  • Dalam Pengiriman: {$rev['shipped_orders']}\n"
+               . "  • Pesanan Selesai: {$rev['completed_orders']}\n"
+               . "  • Dibatalkan: {$rev['cancelled_orders']}\n\n"
+               . "Data diambil secara real-time dari database produksi.";
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'stats_card' => [
+                ['label' => 'Total Omzet', 'value' => $rev['total_revenue_formatted'], 'icon' => 'bi-cash-coin', 'color' => 'success'],
+                ['label' => 'Pesanan Diproses', 'value' => $rev['processing_orders'] . ' Order', 'icon' => 'bi-hourglass-split', 'color' => 'warning'],
+                ['label' => 'Pesanan Selesai', 'value' => $rev['completed_orders'] . ' Order', 'icon' => 'bi-check2-circle', 'color' => 'info']
+            ],
+            'products' => [],
+            'suggestions' => ['Performa Penjualan Minggu Ini', 'Laporan Penjualan Hari Ini', '📊 Ringkasan Produk'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Platform Feature Search (Feature Registry Navigator)
+     */
+    private function handleFeatureSearch(string $normalized, string $role): ?array {
+        // Jangan intersep pertanyaan data/agregasi atau identitas (misal: "berapa total pengguna", "siapa saya")
+        if (
+            str_contains($normalized, 'berapa') ||
+            str_contains($normalized, 'total') ||
+            str_contains($normalized, 'jumlah') ||
+            str_contains($normalized, 'hitung') ||
+            str_contains($normalized, 'siapa') ||
+            str_contains($normalized, 'banyak')
+        ) {
+            return null;
+        }
+
+        $featureKeywords = ['fitur', 'halaman', 'menu', 'buka', 'di mana', 'dimana', 'bagaimana', 'cara buka', 'navigasi', 'dasbor', 'dashboard', 'manajemen user', 'manajemen pengguna'];
+        $hasFeatureQuery = false;
+        foreach ($featureKeywords as $kw) {
+            if (str_contains($normalized, $kw)) {
+                $hasFeatureQuery = true;
+                break;
+            }
+        }
+
+        $matches = FeatureRegistry::searchFeatures($normalized, $role);
+        if (!$hasFeatureQuery && (empty($matches) || $matches[0]['score'] < 16)) {
+            return null;
+        }
+        if (empty($matches)) return null;
+
+        $top = $matches[0];
+        $baseUrl = $this->getBaseUrl();
+        $targetUrl = $baseUrl . $top['url'];
+
+        $reply = "📌 **Fitur Platform: {$top['name']}**\n\n"
+               . "{$top['description']}\n\n"
+               . "Kamu bisa langsung mengaksesnya melalui tautan: [Buka {$top['name']}]({$targetUrl})";
+
+        if (count($matches) > 1) {
+            $otherLinks = [];
+            for ($i = 1; $i < min(4, count($matches)); $i++) {
+                $otherLinks[] = "- [{$matches[$i]['name']}]({$baseUrl}{$matches[$i]['url']})";
+            }
+            $reply .= "\n\nFitur terkait lainnya:\n" . implode("\n", $otherLinks);
+        }
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'products' => [],
+            'suggestions' => ['Katalog Produk', 'Bantuan FAQ', '📊 Ringkasan Produk'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Helper to render structured products table
+     */
+    private function buildProductsTable(array $products): array {
+        $rows = [];
+        foreach ($products as $p) {
+            $rows[] = [
+                'sku' => $p['sku'],
+                'name' => $p['name'],
+                'category' => $p['category_name'],
+                'price' => $p['price_formatted'],
+                'stock' => $p['stock'] . ' unit',
+                'status' => strtoupper($p['status'])
+            ];
+        }
+        return [
+            'headers' => ['SKU', 'Nama Produk', 'Kategori', 'Harga', 'Stok', 'Status'],
+            'rows' => $rows
+        ];
+    }
+
+    /**
+     * Price filter query
+     */
+    private function handlePriceFilterQuery(string $normalized, array &$context): array {
+        $maxPrice = null;
+        if (preg_match('/(di bawah|dibawah|kurang dari|maksimal|budget)\s*(rp\.?|rp)?\s*([0-9]+)(\s*rb|\s*ribu|\.000)?/i', $normalized, $matches)) {
+            $num = (int)$matches[3];
+            if (isset($matches[4]) && (str_contains($matches[4], 'rb') || str_contains($matches[4], 'ribu') || str_contains($matches[4], '.000'))) {
+                $maxPrice = $num * 1000;
+            } else {
+                $maxPrice = $num <= 500 ? $num * 1000 : $num;
+            }
+        } elseif (str_contains($normalized, 'murah') || str_contains($normalized, 'terjangkau') || str_contains($normalized, 'hemat')) {
+            $maxPrice = 35000;
+        }
+
+        $filters = [
+            'status' => 'active',
+            'max_price' => $maxPrice,
+            'sort' => 'price_asc',
+            'limit' => 4
+        ];
+        $products = $this->productService->searchProductsStructured($filters);
+
+        if (empty($products)) {
+            return [
+                'success' => true,
+                'reply' => "Saat ini kami belum memiliki produk aktif dengan rentang harga tersebut. Koleksi aksesoris kami dimulai dari Rp 16.500 (Scrunchie Sutra Organza).",
+                'products' => [],
+                'suggestions' => ['Scrunchie Pastel', 'Jepit Korea', 'Semua Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        $context['last_products'] = $products;
+        $context['focused_product'] = $products[0];
+        $context['last_topic'] = 'cheap_products';
+
+        $reply = $maxPrice !== null 
+            ? "Tentu! Ini beberapa pilihan aksesoris cantik dengan harga terjangkau (di bawah " . format_rupiah($maxPrice) . ") yang siap kamu pesan:"
+            : "Ini beberapa rekomendasi aksesoris termurah dan terfavorit di nnasa_ca:";
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'products' => $products,
+            'suggestions' => ['Kalau yang warna hitam ada?', 'Berapa Harganya?', 'Cara Membeli'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Recommendation / Best Sellers / New arrivals
+     */
+    private function handleRecommendationQuery(string $normalized, array &$context): array {
+        if (str_contains($normalized, 'kado') || str_contains($normalized, 'hadiah') || str_contains($normalized, 'hampers')) {
+            $products = $this->productService->searchProductsStructured(['category_id' => 10, 'limit' => 2]);
+            if (!empty($products)) {
+                $context['last_products'] = $products;
+                $context['focused_product'] = $products[0];
+
+                return [
+                    'success' => true,
+                    'reply' => "Untuk hadiah atau kado istimewa, aku sangat merekomendasikan **{$products[0]['name']}**! Paket ini sudah berisi 4 aksesoris lengkap (kalung, gelang, anting, dan jepit) yang dikemas dalam exclusive hardbox berpita cantik & kartu ucapan elegan. Pasti bikin yang menerima bahagia! ✨",
+                    'products' => $products,
+                    'suggestions' => ['Berapa Harganya?', 'Lihat Detail Paket', 'Rekomendasi Lainnya'],
+                    'provider' => 'builtin'
+                ];
+            }
+        }
+
+        if (str_contains($normalized, 'baru') || str_contains($normalized, 'terbaru') || str_contains($normalized, 'new')) {
+            $products = $this->productService->getRecentProducts(4);
+            $count = count($products);
+            $context['last_products'] = $products;
+
+            return [
+                'success' => true,
+                'reply' => "Berikut adalah **{$count} produk terbaru** yang baru saja ditambahkan ke dalam katalog nnasa_ca:",
+                'table' => $this->buildProductsTable($products),
+                'products' => $products,
+                'suggestions' => ['Lihat Semua Produk', 'Produk Terlaris', 'Cek Diskon'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Default: Best sellers
+        $products = $this->productService->searchProductsStructured(['status' => 'active', 'sort' => 'sales', 'limit' => 3]);
+        $context['last_products'] = $products;
+
+        return [
+            'success' => true,
+            'reply' => "Berikut adalah **produk terlaris (Best Seller)** di nnasa_ca yang paling banyak diminati pelanggan kami:",
+            'products' => $products,
+            'suggestions' => ['Aksesoris Murah', 'Cek Stok Kalung', 'Cara Pesan'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Category query
+     */
+    private function handleCategoryQuery(array $cat, string $normalized, array &$context): array {
+        $products = $this->productService->searchProductsStructured([
+            'status' => 'active',
+            'category_id' => $cat['id'],
+            'sort' => 'sales',
+            'limit' => 4
+        ]);
+
+        if (empty($products)) {
+            return [
+                'success' => true,
+                'reply' => "Saat ini produk pada kategori **{$cat['name']}** sedang dalam persiapan penambahan stok baru.",
+                'products' => [],
+                'suggestions' => ['Kategori Lainnya', 'Koleksi Terlaris'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        $context['last_products'] = $products;
+        $context['focused_product'] = $products[0];
+
+        return [
+            'success' => true,
+            'reply' => "Berikut pilihan aksesoris cantik dalam kategori **{$cat['name']}**:",
+            'products' => $products,
+            'suggestions' => ['Urutkan Paling Murah', 'Varian Warna Apa Saja?', 'Cara Membeli'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * General Product Search
+     */
+    private function handleGeneralProductSearch(string $normalized, array &$context): ?array {
+        $stopWords = ['apakah', 'ada', 'punya', 'jual', 'toko', 'kak', 'kakak', 'min', 'admin', 'bisa', 'tolong', 'cari', 'carikan', 'lihat', 'koleksi', 'mau', 'beli', 'dong'];
+        $cleanTokens = array_filter(explode(' ', $normalized), function($w) use ($stopWords) {
+            return strlen($w) > 2 && !in_array($w, $stopWords);
+        });
+
+        if (empty($cleanTokens)) {
+            return null;
+        }
+
+        $term = implode(' ', $cleanTokens);
+        $products = $this->productService->searchProductsStructured([
+            'status' => 'active',
+            'name' => $term,
+            'limit' => 4
+        ]);
+
+        if (!empty($products)) {
+            $context['last_products'] = $products;
+            $context['focused_product'] = $products[0];
+
+            return [
+                'success' => true,
+                'reply' => "Aku menemukan " . count($products) . " produk yang sesuai dengan pencarian kamu:",
+                'products' => $products,
+                'suggestions' => ['Berapa Harganya?', 'Cek Stok Produk Ini', 'Cara Memesan'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Specific product stock check
+     */
+    private function handleSpecificStockQuery(string $normalized, array &$context): ?array {
+        // Strip out question words
+        $clean = preg_replace('/\b(berapa|brp|stok|stock|stoknya|jumlah|unit|tersedia|ready|apakah|ada|produk)\b/i', '', $normalized);
+        $clean = trim($clean);
+
+        if (strlen($clean) >= 3) {
+            $detail = $this->productService->getProductStock($clean);
+            if ($detail) {
+                $context['last_products'] = [$detail];
+                $context['focused_product'] = $detail;
+
+                $stockText = $detail['stock'] > 0
+                    ? "Produk **{$detail['name']}** (SKU: `{$detail['sku']}`) saat ini **tersedia dengan stok {$detail['stock']} unit** seharga **{$detail['price_formatted']}**."
+                    : "Mohon maaf, produk **{$detail['name']}** saat ini stoknya sedang habis.";
+
+                if (!empty($detail['variants'])) {
+                    $vLines = [];
+                    foreach ($detail['variants'] as $v) {
+                        $vLines[] = "- {$v['variant_name']} **{$v['variant_value']}**: stok {$v['stock']} pcs";
+                    }
+                    $stockText .= "\n\nRincian stok per varian:\n" . implode("\n", $vLines);
+                }
+
+                return [
+                    'success' => true,
+                    'reply' => $stockText,
+                    'products' => [$detail],
+                    'suggestions' => ['Lihat Detail Produk', 'Berapa Harganya?', 'Cari Aksesoris Lain'],
+                    'provider' => 'builtin'
+                ];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Website Guide / How-to Query
+     */
+    private function handleWebsiteGuideQuery(string $normalized, array &$context): array {
+        $baseUrl = $this->getBaseUrl();
+
+        // How to buy / checkout
+        if (str_contains($normalized, 'beli') || str_contains($normalized, 'checkout') || str_contains($normalized, 'pesan') || str_contains($normalized, 'order')) {
+            $reply = "Cara berbelanja di **nnasa_ca** sangat mudah:\n\n"
+                   . "1. **Pilih Aksesoris**: Jelajahi [Katalog Produk]({$baseUrl}products.php) dan klik produk yang kamu sukai.\n"
+                   . "2. **Pilih Varian & Jumlah**: Tentukan pilihan warna/ukuran serta jumlah barang, lalu klik tombol **'Tambah ke Keranjang'** atau **'Beli Sekarang'**.\n"
+                   . "3. **Buka Keranjang**: Masuk ke [Keranjang Belanja]({$baseUrl}cart.php) untuk memeriksa pesananmu.\n"
+                   . "4. **Checkout**: Masukkan alamat pengiriman, pilih jasa kurir (SiCepat, JNE, atau J&T), dan gunakan kupon promo jika ada (kode: `NNASANEW`).\n"
+                   . "5. **Pembayaran**: Selesaikan pembayaran melalui QRIS, Virtual Account, atau Transfer Bank.\n\n"
+                   . "Setelah pembayaran berhasil, pesananmu akan segera dikemas dan dikirimkan! ✨";
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Buka Katalog Produk', 'Lihat Keranjang', 'Info Metode Pembayaran'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Payment methods
+        if (str_contains($normalized, 'bayar') || str_contains($normalized, 'metode') || str_contains($normalized, 'rekening') || str_contains($normalized, 'bank')) {
+            $bca = $this->settings['bank_bca_acc'] ?? '8830192831';
+            $mandiri = $this->settings['bank_mandiri_acc'] ?? '1220098765432';
+
+            $reply = "Kami mendukung berbagai metode pembayaran yang aman dan praktis:\n\n"
+                   . "📱 **QRIS**: Bisa dipindai melalui aplikasi GoPay, OVO, Dana, ShopeePay, BCA Mobile, dan seluruh aplikasi m-banking.\n"
+                   . "💳 **Virtual Account (VA)**: BCA, Bank Mandiri, dan BRI dengan verifikasi otomatis.\n"
+                   . "🏦 **Transfer Bank Manual**: BCA ({$bca}) & Mandiri ({$mandiri}) a.n. PT NNasa Cantik Aksesoris.\n\n"
+                   . "*Catatan: Pada tahap pengembangan saat ini, sistem juga menyediakan tombol simulasi pembayaran instan (DEMO sandbox) untuk kemudahan pengujian.*";
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Cara Checkout', 'Lacak Pesanan', 'Katalog Aksesoris'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Shipping / Tracking / Courier
+        if (str_contains($normalized, 'kirim') || str_contains($normalized, 'ongkir') || str_contains($normalized, 'kurir') || str_contains($normalized, 'resi') || str_contains($normalized, 'lacak')) {
+            $origin = $this->settings['shipping_origin'] ?? 'Jakarta Utara';
+            $ongkir = format_rupiah((float)($this->settings['shipping_cost_default'] ?? 12000));
+
+            $reply = "Informasi Pengiriman & Ekspedisi nnasa_ca:\n\n"
+                   . "🚚 **Kurir Resmi**: SiCepat Express, JNE Regular, dan J&T Express.\n"
+                   . "📍 **Asal Pengiriman**: {$origin}.\n"
+                   . "💰 **Tarif Dasar Pengiriman**: Mulai dari {$ongkir} (dihitung otomatis saat checkout sesuai alamat penerima).\n"
+                   . "📦 **Lacak Resi**: Kamu bisa memantau status perjalanan paket secara real-time di halaman [Lacak Pesanan]({$baseUrl}tracking.php) hanya dengan memasukkan nomor pesanan kamu!";
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Buka Lacak Pesanan', 'Cara Membeli', 'Hubungi WhatsApp'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Contact Admin / WhatsApp
+        if (str_contains($normalized, 'admin') || str_contains($normalized, 'kontak') || str_contains($normalized, 'hubungi') || str_contains($normalized, 'wa') || str_contains($normalized, 'whatsapp') || str_contains($normalized, 'cs')) {
+            $wa = $this->settings['contact_whatsapp'] ?? '081298765432';
+            $email = $this->settings['contact_email'] ?? 'support@nnasaca.com';
+
+            $reply = "Tim Customer Service nnasa_ca siap melayani kamu setiap hari (09.00 - 21.00 WIB):\n\n"
+                   . "💬 **WhatsApp Resmi**: [+62 {$wa}](https://wa.me/" . preg_replace('/[^0-9]/', '', $wa) . ")\n"
+                   . "📧 **Email**: {$email}\n"
+                   . "🏢 **Alamat Butik**: " . ($this->settings['contact_address'] ?? 'Grand Boutique Center, Jakarta Utara') . "\n\n"
+                   . "Kamu juga bisa mengirimkan formulir pesan langsung di halaman [Hubungi Kami]({$baseUrl}contact.php).";
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Buka Kontak Toko', 'Pusat Bantuan FAQ', 'Katalog Produk'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        // Store identity / about
+        if (str_contains($normalized, 'tentang') || str_contains($normalized, 'toko') || str_contains($normalized, 'siapa')) {
+            $reply = "**nnasa_ca** adalah butik online spesialis aksesoris wanita modern dengan sentuhan elegan, feminin, dan bernuansa rose gold. "
+                   . "Kami menghadirkan jepit rambut mutiara korea, scrunchie sutra organza, kalung liontin clover berlapis emas 18K, gelang serut kristal zirkonia, anting hypoallergenic, hingga paket bundling kado premium. "
+                   . "Seluruh produk kami dipacking aman dengan bubble wrap tebal dan box estetik! ✨";
+
+            return [
+                'success' => true,
+                'reply' => $reply,
+                'products' => [],
+                'suggestions' => ['Lihat Semua Produk', 'Promo Terbaru', 'Cara Beli'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        return [
+            'success' => true,
+            'reply' => "Untuk informasi panduan selengkapnya, kamu bisa mengunjungi halaman [Pusat Bantuan & FAQ]({$baseUrl}help.php) atau langsung menanyakan produk yang ingin kamu cari! 🌸",
+            'products' => [],
+            'suggestions' => ['Cara Checkout', 'Metode Pembayaran', 'Hubungi WhatsApp'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Coupon / Voucher handler
+     */
+    private function handleCouponQuery(string $normalized, array &$context): array {
+        $stmt = $this->db->prepare("SELECT * FROM coupons WHERE status = 'active' ORDER BY discount_value DESC LIMIT 3");
+        $stmt->execute();
+        $coupons = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if (empty($coupons)) {
+            return [
+                'success' => true,
+                'reply' => "Saat ini belum ada kode kupon baru yang aktif. Namun kamu tetap bisa menikmati harga promo langsung pada produk-produk bertanda diskon di katalog kami!",
+                'products' => [],
+                'suggestions' => ['Produk Promo', 'Katalog Aksesoris'],
+                'provider' => 'builtin'
+            ];
+        }
+
+        $lines = [];
+        foreach ($coupons as $c) {
+            $val = $c['discount_type'] === 'percentage' 
+                ? "Diskon {$c['discount_value']}% (Maks. " . format_rupiah((float)$c['maximum_discount']) . ")"
+                : "Potongan " . format_rupiah((float)$c['discount_value']);
+            $min = format_rupiah((float)$c['minimum_purchase']);
+            $lines[] = "- Kode: **`{$c['code']}`** ({$val}, Min. Belanja: {$min})";
+        }
+
+        $reply = "Kabar gembira! Ini voucher diskon aktif yang bisa kamu pakai saat checkout:\n\n"
+               . implode("\n", $lines)
+               . "\n\nCukup salin kodenya dan masukkan pada kolom voucher di halaman checkout ya! 🎉";
+
+        return [
+            'success' => true,
+            'reply' => $reply,
+            'products' => [],
+            'suggestions' => ['Buka Katalog Produk', 'Cara Memakai Voucher', 'Produk Promo'],
+            'provider' => 'builtin'
+        ];
+    }
+
+    /**
+     * Search products by specific color variant
+     */
+    private function searchProductsByColor(string $colorKey, array $synonyms): array {
+        $found = [];
+        $sql = "
+            SELECT DISTINCT p.*, COALESCE(c.name, 'Tanpa Kategori') AS category_name, pv.variant_value, pv.stock AS variant_stock, pv.price_adjustment
+            FROM products p
+            JOIN product_variants pv ON p.id = pv.product_id
+            LEFT JOIN categories c ON p.category_id = c.id
+            WHERE p.status = 'active' AND pv.status = 'active' AND (
+        ";
+
+        $clauses = [];
+        $params = [];
+        foreach ($synonyms as $syn) {
+            $clauses[] = "pv.variant_value LIKE ?";
+            $params[] = "%{$syn}%";
+        }
+        $sql .= implode(' OR ', $clauses) . ") LIMIT 4";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($rows as $r) {
+            $formatted = $this->productService->getProductStock($r['name']);
+            if ($formatted) {
+                $formatted['matched_variant'] = [
+                    'variant_value' => $r['variant_value'],
+                    'stock' => $r['variant_stock']
+                ];
+                $found[] = $formatted;
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Match query against category names/slugs
+     */
+    private function matchCategory(string $normalized): ?array {
+        $stmt = $this->db->query("SELECT id, parent_id, name, slug FROM categories WHERE status = 'active'");
+        $cats = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($cats as $c) {
+            $cNorm = $this->normalizeText($c['name']);
+            if (str_contains($normalized, $cNorm) || str_contains($normalized, str_replace('-', ' ', $c['slug']))) {
+                return $c;
+            }
+        }
+
+        // Aliases
+        $aliases = [
+            'rambut' => 'Aksesoris Rambut',
+            'jedai' => 'Jepit Rambut dan Hair Clip',
+            'jepit' => 'Jepit Rambut dan Hair Clip',
+            'hair clip' => 'Jepit Rambut dan Hair Clip',
+            'scrunchie' => 'Ikat Rambut & Scrunchie',
+            'ikat rambut' => 'Ikat Rambut & Scrunchie',
+            'kalung' => 'Kalung',
+            'gelang' => 'Gelang',
+            'cincin' => 'Cincin',
+            'anting' => 'Anting',
+            'tas' => 'Aksesoris Tas & Keychain',
+            'keychain' => 'Aksesoris Tas & Keychain',
+            'bros' => 'Aksesoris Fashion',
+            'bundling' => 'Paket Bundling',
+            'kado' => 'Paket Bundling',
+            'gift box' => 'Paket Bundling'
+        ];
+
+        foreach ($aliases as $alias => $targetCatName) {
+            if (str_contains($normalized, $alias)) {
+                foreach ($cats as $c) {
+                    if ($c['name'] === $targetCatName) {
+                        return $c;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Dynamic Intent-to-Database Grounding Bridge for AI Assistant & Copilot
+     * Detects keywords in admin message and queries real-time database to inject factual context
+     */
+    private function buildDynamicAdminGroundingContext(string $rawMessage, string $normalized, ?array $user): string {
+        $sections = [];
+
+        // REAL-TIME CORE STORE DASHBOARD METRICS (Data Riil Database untuk Admin)
+        try {
+            $revenue = (float)$this->db->query("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE payment_status = 'paid'")->fetchColumn();
+            $revFormatted = number_format($revenue, 0, ',', '.');
+            $pendingOrders = (int)$this->db->query("SELECT COUNT(*) FROM orders WHERE order_status = 'pending'")->fetchColumn();
+            $processingOrders = (int)$this->db->query("SELECT COUNT(*) FROM orders WHERE order_status = 'processing'")->fetchColumn();
+            $totalActive = (int)$this->db->query("SELECT COUNT(*) FROM products WHERE status = 'active'")->fetchColumn();
+            $totalCategories = (int)$this->db->query("SELECT COUNT(*) FROM categories")->fetchColumn();
+            $totalStock = (int)$this->db->query("SELECT COALESCE(SUM(stock), 0) FROM products")->fetchColumn();
+            $lowStock = (int)$this->db->query("SELECT COUNT(*) FROM products WHERE stock <= 5 AND status = 'active'")->fetchColumn();
+            $completedOrders = (int)$this->db->query("SELECT COUNT(*) FROM orders WHERE order_status IN ('completed', 'delivered')")->fetchColumn();
+
+            // Query 5 Pesanan Terbaru (Detail Baris Tabel Database Ringkas)
+            $stmtRecent = $this->db->query("
+                SELECT o.order_number, u.name as customer_name, o.total_amount, o.payment_status, o.order_status
+                FROM orders o
+                JOIN users u ON o.user_id = u.id
+                ORDER BY o.id DESC
+                LIMIT 5
+            ");
+            $recentOrders = $stmtRecent->fetchAll(PDO::FETCH_ASSOC);
+
+            $recentLines = [];
+            foreach ($recentOrders as $ro) {
+                $payText = ($ro['payment_status'] === 'paid') ? 'Lunas' : 'Belum Dibayar';
+                $stMap = [
+                    'pending' => 'Menunggu Pembayaran',
+                    'processing' => 'Diproses',
+                    'shipped' => 'Sedang Dikirim',
+                    'delivered' => 'Selesai',
+                    'completed' => 'Selesai',
+                    'cancelled' => 'Dibatalkan'
+                ];
+                $stText = $stMap[$ro['order_status']] ?? ucfirst($ro['order_status']);
+                $amtText = 'Rp ' . number_format((float)$ro['total_amount'], 0, ',', '.');
+                $recentLines[] = "- {$ro['order_number']}, Pelanggan: {$ro['customer_name']}, Total: {$amtText}, Pembayaran: {$payText}, Status: {$stText}.";
+            }
+            $recentOrdersFormatted = implode("\n", $recentLines);
+
+            $sections[] = "Anda adalah Asisten Admin Nnaco.SA. Jawab pertanyaan admin secara ringkas dan akurat berdasarkan data rill database berikut ini:\n"
+                . "DATA AGREGAT TOKO: Pendapatan: Rp {$revFormatted}, Pesanan Belum Bayar: {$pendingOrders}, Pesanan Perlu Diproses: {$processingOrders}, Produk Aktif: {$totalActive}, Total Kategori: {$totalCategories}, Total Unit Stok: {$totalStock}.\n\n"
+                . "DETAIL 10 PESANAN TERBARU (TABEL DATABASE):\n"
+                . "{$recentOrdersFormatted}\n\n"
+                . "ATURAN: Jika data yang ditanyakan (seperti nama pelanggan, nominal, status pembayaran atau status pesanan) ada pada data di atas, berikan jawaban langsung tanpa bertele-tele.";
+        } catch (Exception $e) {
+            // Silently ignore if DB read fails
+        }
+
+        // 1. INTENT A: Stock & Low-Stock / Out-of-Stock Query
+        if (str_contains($normalized, 'stok') || str_contains($normalized, 'stock') || str_contains($normalized, 'sisa') || str_contains($normalized, 'habis') || str_contains($normalized, 'menipis')) {
+            $threshold = 5;
+            if (preg_match('/(?:kurang dari|di bawah|dibawah|<|sisa)\s*([0-9]+)/i', $normalized, $matches)) {
+                $threshold = (int)$matches[1];
+            }
+
+            $stmtStock = $this->db->prepare("
+                SELECT p.name, p.sku, p.stock, p.price, COALESCE(c.name, 'Aksesoris') AS category_name
+                FROM products p
+                LEFT JOIN categories c ON p.category_id = c.id
+                WHERE p.status = 'active' AND p.stock < ?
+                ORDER BY p.stock ASC
+            ");
+            $stmtStock->execute([$threshold]);
+            $lowProducts = $stmtStock->fetchAll(PDO::FETCH_ASSOC);
+
+            $stockLines = ["[DATA INTERNAL DATABASE: PRODUK DENGAN STOK DI BAWAH {$threshold} UNIT]"];
+            if (!empty($lowProducts)) {
+                $stockLines[] = "Total ditemukan: " . count($lowProducts) . " produk dengan sisa stok < {$threshold}:";
+                foreach ($lowProducts as $lp) {
+                    $stockLines[] = "- {$lp['name']} (SKU: {$lp['sku']}, Kategori: {$lp['category_name']}) -> Sisa Stok: {$lp['stock']} unit (Harga: Rp " . number_format($lp['price'], 0, ',', '.') . ")";
+                }
+            } else {
+                $stockLines[] = "Semua produk aktif memiliki stok aman (>= {$threshold} unit). Tidak ada produk dengan stok < {$threshold} unit.";
+            }
+            $sections[] = implode("\n", $stockLines);
+        }
+
+        // 2. INTENT B: Sales Performance & Revenue (Weekly / Daily / Monthly)
+        if (str_contains($normalized, 'penjualan') || str_contains($normalized, 'omzet') || str_contains($normalized, 'omset') || str_contains($normalized, 'pendapatan') || str_contains($normalized, 'transaksi') || str_contains($normalized, 'performa') || str_contains($normalized, 'order')) {
+            $timeframeLabel = 'Minggu Ini (7 Hari Terakhir)';
+            $dateCondition = "created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)";
+
+            if (str_contains($normalized, 'hari ini') || str_contains($normalized, 'today')) {
+                $timeframeLabel = 'Hari Ini (' . date('d M Y') . ')';
+                $dateCondition = "DATE(created_at) = CURDATE()";
+            } elseif (str_contains($normalized, 'bulan ini') || str_contains($normalized, 'month')) {
+                $timeframeLabel = 'Bulan Ini (' . date('F Y') . ')';
+                $dateCondition = "created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)";
+            }
+
+            // Query sales aggregate
+            $stmtSales = $this->db->query("
+                SELECT 
+                    COUNT(*) AS total_orders,
+                    COALESCE(SUM(total_amount), 0) AS total_amount,
+                    COALESCE(SUM(CASE WHEN payment_status = 'paid' THEN total_amount ELSE 0 END), 0) AS paid_revenue,
+                    SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END) AS paid_orders,
+                    SUM(CASE WHEN order_status = 'completed' THEN 1 ELSE 0 END) AS completed_orders,
+                    SUM(CASE WHEN order_status = 'processing' THEN 1 ELSE 0 END) AS processing_orders,
+                    SUM(CASE WHEN order_status = 'shipped' THEN 1 ELSE 0 END) AS shipped_orders,
+                    SUM(CASE WHEN order_status = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
+                    SUM(CASE WHEN order_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders
+                FROM orders
+                WHERE {$dateCondition}
+            ");
+            $salesData = $stmtSales->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            // Query top-selling products in timeframe
+            $stmtTop = $this->db->query("
+                SELECT oi.product_name_snapshot, SUM(oi.quantity) AS qty_sold, SUM(oi.subtotal) AS total_val
+                FROM order_items oi
+                JOIN orders o ON oi.order_id = o.id
+                WHERE o.{$dateCondition} AND o.payment_status = 'paid'
+                GROUP BY oi.product_name_snapshot
+                ORDER BY qty_sold DESC
+                LIMIT 5
+            ");
+            $topItems = $stmtTop->fetchAll(PDO::FETCH_ASSOC);
+
+            $salesLines = [
+                "[DATA INTERNAL DATABASE: PERFORMA PENJUALAN - PERIODE: {$timeframeLabel}]",
+                "- Total Pendapatan Lunas: Rp " . number_format($salesData['paid_revenue'] ?? 0, 0, ',', '.'),
+                "- Total Pesanan Masuk: " . ($salesData['total_orders'] ?? 0) . " pesanan",
+                "  • Pesanan Lunas / Terbayar: " . ($salesData['paid_orders'] ?? 0),
+                "  • Selesai: " . ($salesData['completed_orders'] ?? 0) . ", Diproses: " . ($salesData['processing_orders'] ?? 0) . ", Dikirim: " . ($salesData['shipped_orders'] ?? 0) . ", Menunggu Pembayaran: " . ($salesData['pending_orders'] ?? 0) . ", Dibatalkan: " . ($salesData['cancelled_orders'] ?? 0)
+            ];
+
+            if (!empty($topItems)) {
+                $salesLines[] = "- Produk Terlaris Periode Ini:";
+                foreach ($topItems as $ti) {
+                    $salesLines[] = "  * {$ti['product_name_snapshot']} (Terjual {$ti['qty_sold']} pcs - Total Omzet: Rp " . number_format($ti['total_val'], 0, ',', '.') . ")";
+                }
+            } else {
+                $salesLines[] = "- Belum ada item yang lunas terjual pada periode ini.";
+            }
+
+            $sections[] = implode("\n", $salesLines);
+        }
+
+        // 3. INTENT C1: Total Pengguna / User Terdaftar di Database (SELECT COUNT(*) FROM users)
+        $isTotalUsersQuery = (
+            (str_contains($normalized, 'total') || str_contains($normalized, 'jumlah') || str_contains($normalized, 'berapa') || str_contains($normalized, 'hitung')) &&
+            (str_contains($normalized, 'pengguna') || str_contains($normalized, 'user') || str_contains($normalized, 'member') || str_contains($normalized, 'akun'))
+        );
+
+        if ($isTotalUsersQuery) {
+            $stmtUserCount = $this->db->query("SELECT COUNT(*) FROM users");
+            $totalUsers = (int)$stmtUserCount->fetchColumn();
+
+            $sections[] = "[DATA INTERNAL DATABASE: TOTAL PENGGUNA TERDAFTAR]\n"
+                . "Konteks: Total pengguna terdaftar saat ini adalah {$totalUsers} orang.";
+        }
+
+        // 4. INTENT C2: Identitas Admin (Siapa Saya / Akun Pengguna yang Bertanya)
+        if (
+            str_contains($normalized, 'siapa saya') || 
+            str_contains($normalized, 'siapa aku') || 
+            str_contains($normalized, 'siapa nama saya') ||
+            str_contains($normalized, 'identitas saya') ||
+            str_contains($normalized, 'profil saya') ||
+            str_contains($normalized, 'akun saya')
+        ) {
+            $adminName = $user['name'] ?? ($_SESSION['user_name'] ?? 'Admin');
+            $adminRole = ucfirst($user['role'] ?? ($_SESSION['user_role'] ?? 'Admin'));
+            $sections[] = "[DATA INTERNAL DATABASE: IDENTITAS PENGGUNA]\n"
+                . "Konteks: User yang bertanya adalah {$adminRole} bernama {$adminName}.";
+        }
+
+        // 5. INTENT C3: Customer / Pelanggan Unik Belanja Hari Ini atau Periode Tertentu
+        if (
+            !$isTotalUsersQuery && (
+                str_contains($normalized, 'customer') || 
+                str_contains($normalized, 'pelanggan') || 
+                str_contains($normalized, 'pembeli') || 
+                (str_contains($normalized, 'user') && str_contains($normalized, 'belanja')) ||
+                (str_contains($normalized, 'berapa') && str_contains($normalized, 'belanja'))
+            )
+        ) {
+            $isToday = str_contains($normalized, 'hari ini') || str_contains($normalized, 'today');
+            $dateCondition = $isToday ? "DATE(o.created_at) = CURDATE()" : "o.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)";
+            $label = $isToday ? "Hari Ini (" . date('d M Y') . ")" : "7 Hari Terakhir";
+
+            $stmtCust = $this->db->query("
+                SELECT 
+                    COUNT(DISTINCT o.user_id) AS total_unique_customers,
+                    COUNT(DISTINCT CASE WHEN o.payment_status = 'paid' THEN o.user_id END) AS paid_unique_customers,
+                    COUNT(*) AS total_orders
+                FROM orders o
+                WHERE {$dateCondition}
+            ");
+            $custData = $stmtCust->fetch(PDO::FETCH_ASSOC) ?: [];
+            $totalCust = (int)($custData['total_unique_customers'] ?? 0);
+            $paidCust = (int)($custData['paid_unique_customers'] ?? 0);
+            $totalOrders = (int)($custData['total_orders'] ?? 0);
+
+            $custLines = [
+                "[DATA INTERNAL DATABASE: JUMLAH CUSTOMER / PEMBELI ({$label})]",
+                "- Hari ini ada {$totalCust} customer unik yang berbelanja (dengan total {$totalOrders} transaksi pesanan masuk).",
+                "- Customer dengan pesanan terbayar/lunas: {$paidCust} orang."
+            ];
+
+            if ($totalCust > 0) {
+                $stmtCustDetails = $this->db->query("
+                    SELECT DISTINCT u.id, u.name, u.email, o.order_number, o.total_amount, o.payment_status
+                    FROM orders o
+                    JOIN users u ON o.user_id = u.id
+                    WHERE {$dateCondition}
+                    ORDER BY o.id DESC
+                    LIMIT 5
+                ");
+                $details = $stmtCustDetails->fetchAll(PDO::FETCH_ASSOC);
+                if (!empty($details)) {
+                    $custLines[] = "- Rincian Pelanggan Terkait:";
+                    foreach ($details as $d) {
+                        $custLines[] = "  • {$d['name']} ({$d['email']}) | No. Pesanan: {$d['order_number']} | Total: Rp " . number_format($d['total_amount'], 0, ',', '.') . " | Status Bayar: {$d['payment_status']}";
+                    }
+                }
+            }
+
+            $sections[] = implode("\n", $custLines);
+        }
+
+        // 4. INTENT D: Recent Orders / Specific Order lookup
+        if (str_contains($normalized, 'pesanan') || str_contains($normalized, 'order') || preg_match('/NNA-[0-9]{8}/i', $rawMessage)) {
+            $stmtRecentOrders = $this->db->query("
+                SELECT order_number, total_amount, payment_status, order_status, created_at
+                FROM orders ORDER BY id DESC LIMIT 5
+            ");
+            $recent = $stmtRecentOrders->fetchAll(PDO::FETCH_ASSOC);
+            $orderLines = ["[DATA INTERNAL DATABASE: PESANAN TERBARU]"];
+            foreach ($recent as $ro) {
+                $orderLines[] = "- {$ro['order_number']} | Rp " . number_format($ro['total_amount'], 0, ',', '.') . " | Bayar: {$ro['payment_status']} | Status: {$ro['order_status']} | Waktu: {$ro['created_at']}";
+            }
+            $sections[] = implode("\n", $orderLines);
+        }
+
+        // 5. FALLBACK / GENERAL STORE SNAPSHOT (Always include general factual numbers)
+        $summary = $this->productService->getSummary();
+        $revSummary = $this->orderService->getAdminRevenueSummary();
+
+        // Ambil metrik pembeli hari ini untuk ringkasan umum
+        $stmtCustDaily = $this->db->query("
+            SELECT 
+                COUNT(DISTINCT user_id) AS total_customers_today,
+                COUNT(DISTINCT CASE WHEN payment_status = 'paid' THEN user_id END) AS paid_customers_today
+            FROM orders 
+            WHERE DATE(created_at) = CURDATE()
+        ");
+        $custDaily = $stmtCustDaily->fetch(PDO::FETCH_ASSOC) ?: [];
+        $uniqueCustToday = (int)($custDaily['total_customers_today'] ?? 0);
+        $paidCustToday = (int)($custDaily['paid_customers_today'] ?? 0);
+
+        $fallbackOverview = "[DATA INTERNAL DATABASE: RINGKASAN UMUM TOKO REAL-TIME]\n"
+            . "- Hari ini ada {$uniqueCustToday} customer unik yang berbelanja ({$paidCustToday} customer terbayar/lunas)\n"
+            . "- Total Model Produk: {$summary['total_products']} model ({$summary['active_products']} aktif, {$summary['inactive_products']} nonaktif)\n"
+            . "- Total Stok Fisik Tersedia: {$summary['total_stock_units']} unit\n"
+            . "- Produk Stok Menipis (<= 5 unit): {$summary['low_stock_products']} model\n"
+            . "- Produk Stok Habis: {$summary['out_of_stock_products']} model\n"
+            . "- Total Omzet Sepanjang Masa: {$revSummary['total_revenue_formatted']}\n"
+            . "- Omzet Lunas Hari Ini: {$revSummary['today_revenue_formatted']}\n"
+            . "- Total Semua Pesanan: {$revSummary['total_orders']} pesanan";
+
+        $sections[] = $fallbackOverview;
+
+        return implode("\n\n", $sections);
+    }
+
+    /**
+     * Customer Catalog Grounding Bridge
+     * Detects customer intent (promos, specific products, price, stock) and queries only public catalog tables (products, categories, coupons)
+     * Strictly enforces data privacy by never reading or injecting orders, users, or sensitive store data.
+     */
+    private function buildDynamicCustomerGroundingContext(string $rawMessage, string $normalized): string {
+        // 0. INTENT: Tanya Total Produk / Seluruh Katalog Toko (Token Saver Optimization)
+        if (
+            str_contains($normalized, 'seluruh') ||
+            str_contains($normalized, 'semua produk') ||
+            str_contains($normalized, 'total produk') ||
+            str_contains($normalized, 'jumlah produk') ||
+            str_contains($normalized, 'banyak produk') ||
+            str_contains($normalized, 'katalog lengkap') ||
+            str_contains($normalized, 'daftar produk') ||
+            preg_match('/(?:ada\s+)?berapa\s+(?:seluruh\s+|semua\s+|total\s+)?(?:jumlah\s+)?(?:produk|barang|item|koleksi)/i', $normalized)
+        ) {
+            $stmtCount = $this->db->query("SELECT COUNT(*) FROM products WHERE status = 'active'");
+            $total = (int)$stmtCount->fetchColumn();
+
+            $stmtCats = $this->db->query("SELECT name FROM categories WHERE status = 'active' ORDER BY id ASC LIMIT 3");
+            $sampleCats = implode(', ', $stmtCats->fetchAll(PDO::FETCH_COLUMN) ?: ['Aksesoris']);
+
+            return "Data: Total produk aktif saat ini ada {$total} item dari berbagai kategori (seperti {$sampleCats}). JANGAN sebutkan nama produk satu per satu. Arahkan pelanggan untuk melihat kategori di menu atau gunakan kolom pencarian website.";
+        }
+
+        // 1. INTENT A: Promo, Voucher, Diskon, Kupon
+        if (
+            str_contains($normalized, 'promo') ||
+            str_contains($normalized, 'diskon') ||
+            str_contains($normalized, 'kupon') ||
+            str_contains($normalized, 'voucher') ||
+            str_contains($normalized, 'potongan') ||
+            str_contains($normalized, 'cashback')
+        ) {
+            $stmt = $this->db->query("
+                SELECT code, discount_type, discount_value, minimum_purchase, maximum_discount, end_at
+                FROM coupons
+                WHERE status = 'active' AND (end_at IS NULL OR end_at >= NOW())
+                ORDER BY id ASC
+                LIMIT 5
+            ");
+            $coupons = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $text = "[INFO VOUCHER & PROMO AKTIF HARI INI]\n";
+            if (empty($coupons)) {
+                $text .= "- Saat ini belum ada kode voucher kupon baru. Namun banyak produk yang sedang diskon langsung di katalog!\n";
+            } else {
+                foreach ($coupons as $c) {
+                    $potongan = $c['discount_type'] === 'percentage' 
+                        ? "Diskon {$c['discount_value']}% (Maks. Rp " . number_format($c['maximum_discount'], 0, ',', '.') . ")"
+                        : "Potongan Langsung Rp " . number_format($c['discount_value'], 0, ',', '.');
+                    $minBelanja = 'Rp ' . number_format($c['minimum_purchase'], 0, ',', '.');
+                    $text .= "- Kode Kupon: \"{$c['code']}\" ({$potongan}, Min. Belanja: {$minBelanja})\n";
+                }
+            }
+
+            // Produk flash sale / diskon langsung
+            $stmtDisc = $this->db->query("
+                SELECT name, price, discount_price, stock
+                FROM products
+                WHERE status = 'active' AND discount_price IS NOT NULL AND discount_price > 0 AND discount_price < price
+                ORDER BY (price - discount_price) DESC
+                LIMIT 3
+            ");
+            $discProds = $stmtDisc->fetchAll(PDO::FETCH_ASSOC);
+            if (!empty($discProds)) {
+                $text .= "\n[PRODUK FLASH SALE / DISKON LANGSUNG]:\n";
+                foreach ($discProds as $dp) {
+                    $hemat = $dp['price'] - $dp['discount_price'];
+                    $text .= "- {$dp['name']}: Rp " . number_format($dp['discount_price'], 0, ',', '.') . " (Harga normal: Rp " . number_format($dp['price'], 0, ',', '.') . ", Hemat Rp " . number_format($hemat, 0, ',', '.') . ", Stok: {$dp['stock']} pcs)\n";
+                }
+            }
+
+            return $text;
+        }
+
+        // 2. INTENT B: Cek Harga, Stok, atau Spesifik Aksesoris
+        $stopWords = ['apakah', 'berapa', 'harga', 'stok', 'stoknya', 'ada', 'masih', 'yang', 'ini', 'itu', 'kak', 'min', 'mau', 'tanya', 'dong', 'bisa', 'tolong', 'di', 'ke', 'dari', 'ya'];
+        $words = preg_split('/\s+/', preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $normalized));
+        $keywords = array_values(array_filter($words, function($w) use ($stopWords) {
+            return mb_strlen($w) >= 3 && !in_array($w, $stopWords);
+        }));
+
+        if (!empty($keywords)) {
+            $clauses = [];
+            $params = [];
+            foreach ($keywords as $kw) {
+                $clauses[] = "(p.name LIKE ? OR p.description LIKE ? OR c.name LIKE ?)";
+                $params[] = "%{$kw}%";
+                $params[] = "%{$kw}%";
+                $params[] = "%{$kw}%";
+            }
+
+            $whereSql = implode(' OR ', $clauses);
+            $sql = "
+                SELECT p.id, p.name, p.sku, p.price, p.discount_price, p.stock, COALESCE(c.name, 'Aksesoris') AS category_name
+                FROM products p
+                LEFT JOIN categories c ON p.category_id = c.id
+                WHERE p.status = 'active' AND ({$whereSql})
+                ORDER BY (CASE WHEN p.stock > 0 THEN 0 ELSE 1 END) ASC, p.sales_count DESC
+                LIMIT 5
+            ";
+
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
+            $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            if (!empty($products)) {
+                $text = "[DATA PRODUK DITEMUKAN DI DATABASE]:\n";
+                foreach ($products as $p) {
+                    $priceText = 'Rp ' . number_format($p['price'], 0, ',', '.');
+                    if (!empty($p['discount_price']) && $p['discount_price'] > 0 && $p['discount_price'] < $p['price']) {
+                        $priceText = 'Rp ' . number_format($p['discount_price'], 0, ',', '.') . " (Diskon dari Rp " . number_format($p['price'], 0, ',', '.') . ")";
+                    }
+                    $stockText = $p['stock'] > 0 ? "Tersedia ({$p['stock']} pcs siap kirim)" : "Stok Habis";
+                    $text .= "- {$p['name']} [Kategori: {$p['category_name']}] | Harga: {$priceText} | Status Stok: {$stockText}\n";
+                }
+                return $text;
+            }
+        }
+
+        // 3. INTENT C / FALLBACK: Rekomendasi Koleksi Terpopuler & Kebijakan Toko
+        $stmtPop = $this->db->query("
+            SELECT p.name, p.price, p.discount_price, p.stock, COALESCE(c.name, 'Aksesoris') AS category_name
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.id
+            WHERE p.status = 'active' AND p.stock > 0
+            ORDER BY p.sales_count DESC
+            LIMIT 4
+        ");
+        $popular = $stmtPop->fetchAll(PDO::FETCH_ASSOC);
+
+        $text = "[REKOMENDASI KOLEKSI TERPOPULER SAAT INI]:\n";
+        foreach ($popular as $p) {
+            $price = !empty($p['discount_price']) && $p['discount_price'] < $p['price'] ? $p['discount_price'] : $p['price'];
+            $text .= "- {$p['name']} ({$p['category_name']}) - Rp " . number_format($price, 0, ',', '.') . " (Stok: {$p['stock']} pcs)\n";
+        }
+        $text .= "\n[KEBIJAKAN TOKO]: Pengiriman via SiCepat, JNE, J&T. Pembayaran QRIS, Virtual Account, & Transfer Bank.";
+
+        return $text;
+    }
+
+    /**
+     * Query active LLM provider (Gemini / OpenAI) with database grounding & usage logging
+     */
+    private function queryLLMProvider(string $rawMessage, string $normalized, array &$context, ?array $user): ?array {
+        $activeProvider = $this->aiConfig->getActiveProvider();
+        if (!$activeProvider || empty($this->apiKey)) {
+            return null;
+        }
+
+        $activeModel = $this->aiConfig->getDefaultModel();
+        if (!$activeModel) {
+            return null;
+        }
+
+        // 1. Guardrail: Max message length limit
+        $maxMsgLen = (int)$this->aiConfig->getSetting('ai_max_message_length', 1000);
+        if (mb_strlen($rawMessage, 'UTF-8') > $maxMsgLen) {
+            return [
+                'success' => true,
+                'reply' => "Pesan kamu terlalu panjang (maksimal {$maxMsgLen} karakter). Mohon persingkat pertanyaanmu agar aku bisa membantu dengan lebih baik ya! 😊",
+                'products' => [],
+                'suggestions' => $this->getDefaultSuggestions($user['role'] ?? 'public'),
+                'provider' => 'system'
+            ];
+        }
+
+        $isAdmin = isset($user['role']) && $user['role'] === 'admin';
+
+        if ($isAdmin) {
+            // ADMIN COPILOT GROUNDING
+            $summary = $this->productService->getSummary();
+            $summaryText = $this->productService->formatSummaryText($summary);
+
+            $activeProducts = $this->productService->getProductsByStatus('active', 25);
+            $catalogLines = [];
+            foreach ($activeProducts as $p) {
+                $priceStr = 'Rp ' . number_format($p['price'], 0, ',', '.');
+                if (!empty($p['discount_price']) && $p['discount_price'] > 0 && $p['discount_price'] < $p['price']) {
+                    $priceStr = 'Rp ' . number_format($p['discount_price'], 0, ',', '.') . " (Diskon dari Rp " . number_format($p['price'], 0, ',', '.') . ")";
+                }
+                $catalogLines[] = "- {$p['name']} [Kategori: {$p['category_name']}] | Harga: {$priceStr} | Stok: {$p['stock']} unit";
+            }
+            $catalogText = implode("\n", $catalogLines);
+
+            $dynamicInternalData = $this->buildDynamicAdminGroundingContext($rawMessage, $normalized, $user);
+            $promptRow = $this->aiConfig->getActivePrompt();
+            $baseInstruction = $promptRow ? $promptRow['prompt_content'] : "Kamu adalah NNasa Admin Copilot, asisten AI internal pengelola toko aksesoris nnasa_ca.";
+
+            $adminName = $user['name'] ?? ($_SESSION['nama'] ?? ($_SESSION['user_name'] ?? null));
+            $adminRole = strtolower(trim((string)($user['role'] ?? ($_SESSION['role'] ?? ($_SESSION['user_role'] ?? 'admin')))));
+
+            if (!empty($adminName) && ($adminRole === 'admin' || $adminRole === 'staff')) {
+                $userSessionContext = "Konteks Internal: Kamu sedang berbicara dengan Admin toko atas nama {$adminName}.";
+                $greetingInstruction = "Gunakan panggilan yang sesuai (Sapaan 'Admin' untuk admin, contoh: 'Halo Admin {$adminName}').";
+            } elseif (!empty($adminName) && $adminRole === 'customer') {
+                $userSessionContext = "Konteks Internal: Kamu sedang berbicara dengan Customer setia kami atas nama {$adminName}.";
+                $greetingInstruction = "Gunakan panggilan yang sesuai (Sapaan 'Kak' untuk Customer, contoh: 'Halo Kak {$adminName}').";
+            } else {
+                $userSessionContext = "Konteks Internal: Pengguna saat ini belum login (Pengunjung/Guest).";
+                $greetingInstruction = "Gunakan sapaan netral. DILARANG berhalusinasi atau menebak nama jika Konteks Internal kosong (belum login).";
+            }
+
+            $groundedInstruction = $baseInstruction . "\n\n"
+                . "=== IDENTITAS PENGGUNA (SESI LOGIN) ===\n"
+                . $userSessionContext . "\n\n"
+                . "=== Data Internal Saat Ini (DATABASE REAL-TIME SISTEM) ===\n"
+                . $dynamicInternalData . "\n\n"
+                . "=== DATA RESMI TOKO SAAT INI ===\n"
+                . $summaryText . "\n\n"
+                . "=== KATALOG PRODUK AKTIF RESMI ===\n"
+                . $catalogText . "\n\n"
+                . "=== ATURAN KETAT SISTEM (WAJIB DIPATUHI) ===\n"
+                . "1. Jika ditanya 'Siapa saya?', jawablah sesuai dengan Konteks Internal yang diberikan (contoh: 'Anda adalah Admin toko atas nama [Nama]' atau 'Anda adalah Customer kami atas nama [Nama]').\n"
+                . "2. Gunakan panggilan yang sesuai (Sapaan 'Kak' untuk Customer, dan 'Admin' untuk admin). {$greetingInstruction}\n"
+                . "3. DILARANG berhalusinasi atau menebak nama jika Konteks Internal kosong (belum login).\n"
+                . "4. DILARANG memberikan penjelasan panjang lebar, ceramah, atau basa-basi.\n"
+                . "5. Jawab maksimal dalam 1 hingga 2 kalimat pendek saja. Langsung ke intinya (to the point).\n"
+                . "6. Jika ditanya total pengguna, sebutkan saja angkanya berdasarkan data internal di atas.\n"
+                . "7. Faktual: Gunakan data resmi dan data internal di atas secara akurat tanpa mengarang.";
+        } else {
+            // CUSTOMER SHOPPING ASSISTANT GROUNDING (Strictly public catalog and promos only)
+            $dynamicCustomerData = $this->buildDynamicCustomerGroundingContext($rawMessage, $normalized);
+
+            $customerName = $user['name'] ?? ($_SESSION['nama'] ?? ($_SESSION['user_name'] ?? null));
+            $customerRole = strtolower(trim((string)($user['role'] ?? ($_SESSION['role'] ?? ($_SESSION['user_role'] ?? 'guest')))));
+
+            if (!empty($customerName) && $customerRole === 'customer') {
+                $userSessionContext = "Konteks Internal: Kamu sedang berbicara dengan Customer setia kami atas nama {$customerName}.";
+                $greetingRule = "Gunakan panggilan yang sesuai (Sapaan 'Kak' untuk Customer, contoh: 'Halo Kak {$customerName}').";
+            } elseif (!empty($customerName) && $customerRole === 'admin') {
+                $userSessionContext = "Konteks Internal: Kamu sedang berbicara dengan Admin toko atas nama {$customerName}.";
+                $greetingRule = "Gunakan panggilan yang sesuai (Sapaan 'Admin' untuk admin, contoh: 'Halo Admin {$customerName}').";
+            } else {
+                $userSessionContext = "Konteks Internal: Pengguna saat ini belum login (Pengunjung/Guest).";
+                $greetingRule = "Sapa dengan panggilan ramah umum 'Kak'. DILARANG berhalusinasi atau menebak nama jika Konteks Internal kosong (belum login).";
+            }
+
+            $groundedInstruction = <<<PROMPT
+Kamu adalah NNasa AI, asisten belanja resmi toko aksesoris "nnasa_ca".
+Gaya bicara: Ramah, santun, anggun, dan SANGAT SINGKAT (efisien token).
+
+=== IDENTITAS PENGGUNA (SESI LOGIN) ===
+{$userSessionContext}
+=======================================
+
+=== DATA RESMI KATALOG (DATABASE REAL-TIME) ===
+{$dynamicCustomerData}
+==============================================
+
+ATURAN KETAT EFISIENSI BALASAN, IDENTITAS & SAPAAN:
+1. Jika ditanya 'Siapa saya?', jawablah sesuai dengan Konteks Internal yang diberikan (contoh: 'Anda adalah Customer kami atas nama [Nama]' atau 'Anda adalah Admin toko atas nama [Nama]'). Jika Konteks Internal kosong/belum login, beritahukan bahwa pengguna belum login sebagai pengunjung toko.
+2. Gunakan panggilan yang sesuai (Sapaan 'Kak' untuk Customer, dan 'Admin' untuk admin). {$greetingRule}
+3. DILARANG berhalusinasi atau menebak nama jika Konteks Internal kosong (belum login).
+4. BATAS PANJANG: Jawab MAKSIMAL dalam 2-3 kalimat pendek yang ramah. Dilarang keras membuat paragraf panjang atau bertele-tele.
+5. BATAS PRODUK: Dilarang keras menyebutkan lebih dari 3 nama produk dalam satu balasan.
+6. JIKA DITANYA TOTAL ATAU SELURUH PRODUK: Sebutkan HANYA angka total produk yang ada di Data di atas, lalu segera arahkan pelanggan untuk menggunakan fitur pencarian di bagian atas website atau melihat menu kategori. DILARANG membuat daftar produk satu per satu!
+7. FAKTUAL: Jawab HANYA berdasarkan Data Resmi di atas. Jangan mengarang harga, stok, atau promo yang tidak tercantum.
+PROMPT;
+        }
+
+        // Retrieve model parameters
+        $params = $activeModel['params'] ?? [];
+        $params['timeout_seconds'] = !empty($activeModel['timeout_seconds']) && (int)$activeModel['timeout_seconds'] >= 20 ? (int)$activeModel['timeout_seconds'] : 75;
+        // Efisiensi biaya & pencegahan ceramah: Customer max 180 token, Admin dibatasi 200 token
+        $params['max_output_tokens'] = $isAdmin ? 200 : 180;
+
+        $adapter = $this->aiConfig->getAdapter($activeProvider['provider_name'], $this->apiKey);
+        if (!$adapter) {
+            return null;
+        }
+
+        // 5. Execute generation
+        $res = $adapter->generateContent(
+            $rawMessage,
+            $groundedInstruction,
+            $activeModel['model_name'],
+            $params,
+            $this->apiKey
+        );
+
+        if ($res['success'] && !empty($res['reply'])) {
+            // Estimate cost ($0.00000015 per token approx)
+            $inputTokens = $res['input_tokens'] ?? 0;
+            $outputTokens = $res['output_tokens'] ?? 0;
+            $estCost = ($inputTokens * 0.00000015) + ($outputTokens * 0.0000006);
+
+            $this->aiConfig->logUsage([
+                'provider_id' => $activeProvider['id'],
+                'model_id' => $activeModel['id'],
+                'user_id' => $user['id'] ?? null,
+                'request_status' => 'success',
+                'input_tokens' => $inputTokens,
+                'output_tokens' => $outputTokens,
+                'latency_ms' => $res['latency_ms'] ?? 0,
+                'estimated_cost' => $estCost,
+                'error_code' => null
+            ]);
+
+            $matchedProducts = $this->extractProductsFromText($res['reply'] . ' ' . $rawMessage);
+            return [
+                'success' => true,
+                'reply' => trim($res['reply']),
+                'products' => $matchedProducts,
+                'suggestions' => $this->getDefaultSuggestions($user['role'] ?? 'public'),
+                'provider' => $activeProvider['provider_name'],
+                'model' => $activeModel['model_name'],
+                'latency_ms' => $res['latency_ms'] ?? 0
+            ];
+        } else {
+            // Log failure
+            $this->aiConfig->logUsage([
+                'provider_id' => $activeProvider['id'],
+                'model_id' => $activeModel['id'],
+                'user_id' => $user['id'] ?? null,
+                'request_status' => 'failed',
+                'input_tokens' => 0,
+                'output_tokens' => 0,
+                'latency_ms' => $res['latency_ms'] ?? 0,
+                'estimated_cost' => 0,
+                'error_code' => $res['error'] ?? 'API_ERROR'
+            ]);
+        }
+        return null;
+    }
+
+    /**
+     * Extracts active products from text mentions for rich cards preview
+     */
+    private function extractProductsFromText(string $text): array {
+        $activeProducts = $this->productService->getProductsByStatus('active', 30);
+        $matched = [];
+        $lowerText = mb_strtolower($text, 'UTF-8');
+
+        foreach ($activeProducts as $p) {
+            $pName = mb_strtolower($p['name'], 'UTF-8');
+            $pSku = mb_strtolower($p['sku'], 'UTF-8');
+
+            if (str_contains($lowerText, $pName) || str_contains($lowerText, $pSku)) {
+                $matched[$p['id']] = $p;
+            } else {
+                $words = array_filter(explode(' ', $pName), fn($w) => mb_strlen($w) > 4);
+                $hitCount = 0;
+                foreach ($words as $w) {
+                    if (str_contains($lowerText, $w)) {
+                        $hitCount++;
+                    }
+                }
+                if ($hitCount >= 2) {
+                    $matched[$p['id']] = $p;
+                }
+            }
+        }
+
+        return array_values(array_slice($matched, 0, 4));
+    }
+
+    /**
+     * Checks if a user query requires deterministic database computation / system lookup
+     */
+    private function isDeterministicQuery(string $t, array $context): bool {
+        return $this->isGreeting($t)
+            || $this->isThankYou($t)
+            || $this->isIdentityQuery($t)
+            || $this->isOrderInquiry($t)
+            || $this->isRevenueOrSalesQuery($t)
+            || $this->isProductSummaryQuery($t)
+            || $this->isActiveOrInactiveQuery($t)
+            || $this->isLowOrOutOfStockQuery($t)
+            || $this->isStockExtremesQuery($t)
+            || $this->isTotalUnitsStockQuery($t)
+            || $this->isIncompleteDataQuery($t)
+            || $this->isCategoryBreakdownQuery($t)
+            || $this->isSpecificStockQuery($t)
+            || $this->isWebsiteGuideQuery($t)
+            || $this->isDrillDownOrFollowUp($t, $context);
+    }
+
+    /**
+     * Intent Helper Functions
+     */
+    private function isGreeting(string $t): bool {
+        return in_array($t, ['halo', 'hai', 'hello', 'hi', 'hey', 'pagi', 'siang', 'sore', 'malam', 'assalamualaikum', 'ping', 'tes', 'test']) ||
+               preg_match('/^(selamat\s+(pagi|siang|sore|malam)|halo\s*(kak|admin|nnasa)?|hai\s*(kak|admin|nnasa)?)$/i', $t);
+    }
+
+    private function isThankYou(string $t): bool {
+        return in_array($t, ['makasih', 'terima kasih', 'thanks', 'thank you', 'thx', 'tengkyu', 'siap makasih', 'oke makasih']);
+    }
+
+    private function isIdentityQuery(string $t): bool {
+        return str_contains($t, 'siapa kamu') || str_contains($t, 'kamu siapa') || str_contains($t, 'apa itu nnasa ai') || str_contains($t, 'kamu ai apa');
+    }
+
+    private function isDrillDownOrFollowUp(string $t, array $context): bool {
+        if (str_contains($t, 'status') || str_contains($t, 'aktif') || str_contains($t, 'aktip') || 
+            str_contains($t, 'nonaktif') || str_contains($t, 'tidak aktif') || str_contains($t, 'baru') || 
+            str_contains($t, 'kategori') || str_contains($t, 'kata gori') || str_contains($t, 'katagori') ||
+            str_contains($t, 'terlaris') || str_contains($t, 'laris') || str_contains($t, 'fitur') ||
+            str_contains($t, 'produk') || str_contains($t, 'pesanan') || str_contains($t, 'order') ||
+            str_contains($t, 'stok') || str_contains($t, 'omzet') || str_contains($t, 'pendapatan') ||
+            str_contains($t, 'berapa') || str_contains($t, 'total') || str_contains($t, 'jumlah')) {
+            return false;
+        }
+
+        return preg_match('/\b(kalau|kalo|tampilkan semuanya|tampilkan semua|lihat semuanya|lihat semua|semuanya|daftarnya|listnya|warna|berapa harganya|brp harganya|habis saja|yang habis)\b/i', $t);
+    }
+
+    private function isProductSummaryQuery(string $t): bool {
+        return str_contains($t, 'ringkasan produk') ||
+               str_contains($t, 'kondisi produk') ||
+               str_contains($t, 'rekap produk') ||
+               str_contains($t, 'status produk') ||
+               (str_contains($t, 'berapa') && str_contains($t, 'total produk')) ||
+               (str_contains($t, 'ada berapa') && str_contains($t, 'produk di database')) ||
+               (str_contains($t, 'total produk') && str_contains($t, 'database')) ||
+               $t === 'ringkasan' || $t === 'ringkasan produk';
+    }
+
+    private function isActiveOrInactiveQuery(string $t): bool {
+        return (str_contains($t, 'aktif') || str_contains($t, 'aktip') || str_contains($t, 'nonaktif') || str_contains($t, 'tidak aktif')) &&
+               (str_contains($t, 'berapa') || str_contains($t, 'tampilkan') || str_contains($t, 'produk') || str_contains($t, 'daftar'));
+    }
+
+    private function isLowOrOutOfStockQuery(string $t): bool {
+        return str_contains($t, 'stok habis') || str_contains($t, 'habis') || str_contains($t, 'kosong') ||
+               str_contains($t, 'menipis') || str_contains($t, 'hampir habis') || str_contains($t, 'sisa sedikit') ||
+               (str_contains($t, 'stok') && (str_contains($t, 'kurang') || str_contains($t, 'bawah') || str_contains($t, 'sedikit') || str_contains($t, 'sisa') || preg_match('/stok[^\d]*[<]\s*\d+/i', $t)));
+    }
+
+    private function isStockExtremesQuery(string $t): bool {
+        return (str_contains($t, 'stok') || str_contains($t, 'jumlah')) &&
+               (str_contains($t, 'paling sedikit') || str_contains($t, 'terendah') || str_contains($t, 'paling banyak') || str_contains($t, 'terbanyak'));
+    }
+
+    private function isTotalUnitsStockQuery(string $t): bool {
+        return str_contains($t, 'total stok seluruh') ||
+               str_contains($t, 'total stok fisik') ||
+               str_contains($t, 'total unit stok') ||
+               str_contains($t, 'berapa total stok');
+    }
+
+    private function isIncompleteDataQuery(string $t): bool {
+        return str_contains($t, 'belum lengkap') || str_contains($t, 'data kurang') || str_contains($t, 'tidak lengkap') || str_contains($t, 'audit data');
+    }
+
+    private function isCategoryBreakdownQuery(string $t): bool {
+        return (str_contains($t, 'kategori') && (str_contains($t, 'berapa') || str_contains($t, 'jumlah') || str_contains($t, 'distribusi') || str_contains($t, 'rincian')));
+    }
+
+    private function isSpecificStockQuery(string $t): bool {
+        return (str_contains($t, 'stok') || str_contains($t, 'stock') || str_contains($t, 'tersedia') || str_contains($t, 'ready')) &&
+               !str_contains($t, 'kurang') && !str_contains($t, 'bawah') && !str_contains($t, 'menipis') &&
+               !str_contains($t, 'total') && !str_contains($t, 'semua') && !str_contains($t, 'ringkasan');
+    }
+
+    private function isOrderInquiry(string $t): bool {
+        return str_contains($t, 'pesanan') || str_contains($t, 'order') || preg_match('/NNA-[0-9]{8}/i', $t);
+    }
+
+    private function isRevenueOrSalesQuery(string $t): bool {
+        return str_contains($t, 'omzet') || str_contains($t, 'pendapatan') || str_contains($t, 'keuangan') ||
+               str_contains($t, 'omset') || str_contains($t, 'performa penjualan') ||
+               (str_contains($t, 'penjualan') && (str_contains($t, 'ringkasan') || str_contains($t, 'minggu') || str_contains($t, 'hari') || str_contains($t, 'bulan') || str_contains($t, 'laporan') || str_contains($t, 'rekap') || str_contains($t, 'performa')));
+    }
+
+    private function isWebsiteGuideQuery(string $t): bool {
+        return str_contains($t, 'cara') || str_contains($t, 'gimana') || str_contains($t, 'bagaimana') ||
+               str_contains($t, 'bayar') || str_contains($t, 'kirim') || str_contains($t, 'ongkir') ||
+               str_contains($t, 'resi') || str_contains($t, 'lacak') || str_contains($t, 'wa') ||
+               str_contains($t, 'whatsapp') || str_contains($t, 'admin') || str_contains($t, 'tentang');
+    }
+
+    private function isCouponQuery(string $t): bool {
+        return str_contains($t, 'kupon') || str_contains($t, 'voucher') || str_contains($t, 'promo') ||
+               str_contains($t, 'diskon') || str_contains($t, 'potongan') || str_contains($t, 'kode');
+    }
+
+    private function isPriceFilterQuery(string $t): bool {
+        if (str_contains($t, 'stok') || str_contains($t, 'stock') || str_contains($t, 'unit') || str_contains($t, 'pcs') || str_contains($t, 'sisa')) {
+            return false;
+        }
+        return str_contains($t, 'murah') || str_contains($t, 'terjangkau') || str_contains($t, 'hemat') ||
+               str_contains($t, 'di bawah') || str_contains($t, 'dibawah') || str_contains($t, 'kurang dari') ||
+               str_contains($t, 'budget') || str_contains($t, 'paling murah');
+    }
+
+    private function isRecommendationQuery(string $t): bool {
+        return str_contains($t, 'rekomendasi') || str_contains($t, 'saran') || str_contains($t, 'laris') ||
+               str_contains($t, 'terlaris') || str_contains($t, 'best seller') || str_contains($t, 'kado') ||
+               str_contains($t, 'hadiah') || str_contains($t, 'hampers') || str_contains($t, 'terbaru') ||
+               str_contains($t, 'baru') || str_contains($t, 'populer');
+    }
+
+    private function getDefaultSuggestions(string $role): array {
+        if ($role === 'admin' || $role === 'staff') {
+            return [
+                '📊 Ringkasan Produk',
+                '📦 Total Stok Fisik',
+                '⚠️ Stok Menipis',
+                '💰 Ringkasan Omzet',
+                '❌ Produk Stok Habis',
+                '💡 Peta Fitur Admin'
+            ];
+        }
+
+        return [
+            '📊 Ringkasan Produk',
+            '💎 Aksesoris Murah',
+            '🌸 Rekomendasi Kalung',
+            '✨ Cek Stok Jedai',
+            '📦 Cara Membeli',
+            '🏷️ Info Promo NNASANEW'
+        ];
+    }
+
+    private function getBaseUrl(): string {
+        return defined('BASE_URL') ? BASE_URL : '/toko/';
+    }
+
+    /**
+     * Text Normalization & Typo correction
+     */
+    private function normalizeText(string $str): string {
+        $str = mb_strtolower($str, 'UTF-8');
+        $str = preg_replace('/[^\p{L}\p{N}\s\-\.]/u', ' ', $str);
+        $str = preg_replace('/\s+/', ' ', trim($str));
+
+        // Phrase replacements
+        $str = str_replace(['kata gori', 'katagori', 'kategori2'], 'kategori', $str);
+
+        $typos = [
+            'rekomendasiin' => 'rekomendasi',
+            'recomended' => 'rekomendasi',
+            'rekomend' => 'rekomendasi',
+            'murahh' => 'murah',
+            'mura' => 'murah',
+            'ongkrrr' => 'ongkir',
+            'ongkrr' => 'ongkir',
+            'ongkiir' => 'ongkir',
+            'jepitan' => 'jepit',
+            'antingg' => 'anting',
+            'cincinn' => 'cincin',
+            'gelangg' => 'gelang',
+            'hrg' => 'harga',
+            'brp' => 'berapa',
+            'kalo' => 'kalau',
+            'gmn' => 'gimana',
+            'dimana' => 'di mana',
+            'brapa' => 'berapa',
+            'dftr' => 'daftar',
+            'chekout' => 'checkout',
+            'cekout' => 'checkout',
+            'byar' => 'bayar',
+            'pembayarn' => 'pembayaran',
+            'aktip' => 'aktif',
+            'pesenan' => 'pesanan',
+            'ordran' => 'order',
+            'ordr' => 'order'
+        ];
+
+        $words = explode(' ', $str);
+        foreach ($words as &$w) {
+            if (isset($typos[$w])) {
+                $w = $typos[$w];
+            }
+        }
+
+        return implode(' ', $words);
+    }
+}

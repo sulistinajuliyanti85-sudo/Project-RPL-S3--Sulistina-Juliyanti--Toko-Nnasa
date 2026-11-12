@@ -1,0 +1,539 @@
+<?php
+/**
+ * Admin API: AI Configuration Controller
+ * Store: nnasa_ca Accessories Marketplace
+ * Strictly handles authenticated admin requests with CSRF validation and secret masking.
+ */
+
+header('Content-Type: application/json; charset=UTF-8');
+
+require_once dirname(__DIR__, 2) . '/app/Config/config.php';
+require_once dirname(__DIR__, 2) . '/app/Config/database.php';
+require_once dirname(__DIR__, 2) . '/app/Helpers/auth.php';
+require_once dirname(__DIR__, 2) . '/app/Models/AIConfigModel.php';
+
+// Check Admin Authentication
+if (!is_admin()) {
+    http_response_code(403);
+    echo json_encode(['success' => false, 'message' => 'Akses ditolak. Anda harus login sebagai admin.']);
+    exit;
+}
+
+$db = getDB();
+$aiConfig = new AIConfigModel($db);
+
+$action = $_GET['action'] ?? ($_POST['action'] ?? '');
+
+try {
+    switch ($action) {
+        /* ---------------------------------------------------------
+         * 1. GET METRICS & DASHBOARD DATA
+         * --------------------------------------------------------- */
+        case 'get_dashboard_data':
+            $metrics = $aiConfig->getDashboardMetrics();
+            echo json_encode(['success' => true, 'data' => $metrics]);
+            break;
+
+        /* ---------------------------------------------------------
+         * 2. TEST CONNECTION
+         * --------------------------------------------------------- */
+        case 'test_connection':
+            $providerId = (int)($_POST['provider_id'] ?? 0);
+            $inputKey = trim($_POST['api_key'] ?? '');
+            $baseUrl = trim($_POST['base_url'] ?? '');
+
+            $provider = $aiConfig->getProviderById($providerId);
+            if (!$provider) {
+                echo json_encode(['success' => false, 'message' => 'Provider tidak ditemukan.']);
+                exit;
+            }
+
+            // Determine key to use
+            $keyToUse = null;
+            if (!empty($inputKey) && !str_contains($inputKey, '••••') && !str_contains($inputKey, '****')) {
+                $keyToUse = $inputKey;
+            } else {
+                $keyToUse = $aiConfig->getDecryptedApiKey($providerId);
+            }
+
+            $adapter = $aiConfig->getAdapter($provider['provider_name'], $keyToUse);
+            if (!$adapter) {
+                echo json_encode(['success' => false, 'message' => 'Adapter untuk provider ini belum tersedia.']);
+                exit;
+            }
+
+            $testRes = $adapter->testConnection($keyToUse, !empty($baseUrl) ? $baseUrl : null);
+            
+            // Record last test timestamp
+            $aiConfig->saveSettings(['ai_last_test_time' => date('Y-m-d H:i:s')]);
+
+            echo json_encode([
+                'success' => $testRes['success'],
+                'status' => $testRes['status'] ?? ($testRes['success'] ? 'Berhasil' : 'Gagal'),
+                'message' => $testRes['message'],
+                'latency_ms' => $testRes['latency_ms'] ?? 0,
+                'http_code' => $testRes['http_code'] ?? null
+            ]);
+            break;
+
+        /* ---------------------------------------------------------
+         * 3. SAVE PROVIDER CONFIGURATION
+         * --------------------------------------------------------- */
+        case 'save_provider':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi keamanan CSRF tidak valid. Silakan refresh halaman.']);
+                exit;
+            }
+
+            $providerId = (int)($_POST['provider_id'] ?? 0);
+            $displayName = trim($_POST['display_name'] ?? '');
+            $baseUrl = trim($_POST['base_url'] ?? '');
+            $apiKey = trim($_POST['api_key'] ?? '');
+            $isActive = !empty($_POST['is_active']) ? 1 : 0;
+
+            if (empty($displayName)) {
+                echo json_encode(['success' => false, 'message' => 'Nama tampilan provider wajib diisi.']);
+                exit;
+            }
+
+            $saveData = [
+                'id' => $providerId,
+                'display_name' => $displayName,
+                'base_url' => !empty($baseUrl) ? $baseUrl : null,
+                'is_active' => $isActive
+            ];
+
+            // Only pass api_key if new secret entered
+            if (!empty($apiKey) && !str_contains($apiKey, '••••') && !str_contains($apiKey, '****')) {
+                $saveData['api_key'] = $apiKey;
+            }
+
+            $savedId = $aiConfig->saveProvider($saveData);
+            echo json_encode([
+                'success' => true,
+                'message' => 'Konfigurasi provider berhasil disimpan dengan aman! 🔒',
+                'provider_id' => $savedId
+            ]);
+            break;
+
+        /* ---------------------------------------------------------
+         * 4. SET ACTIVE PROVIDER
+         * --------------------------------------------------------- */
+        case 'set_active_provider':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+            $providerId = (int)($_POST['provider_id'] ?? 0);
+            $aiConfig->setProviderActive($providerId, true);
+            echo json_encode(['success' => true, 'message' => 'Provider aktif berhasil diubah.']);
+            break;
+
+        /* ---------------------------------------------------------
+         * 5. FETCH LIVE MODELS FROM PROVIDER API
+         * --------------------------------------------------------- */
+        case 'fetch_models':
+            $providerId = (int)($_GET['provider_id'] ?? ($_POST['provider_id'] ?? 0));
+            $provider = $aiConfig->getProviderById($providerId);
+            if (!$provider) {
+                echo json_encode(['success' => false, 'message' => 'Provider tidak valid.']);
+                exit;
+            }
+
+            $apiKey = $aiConfig->getDecryptedApiKey($providerId);
+            $adapter = $aiConfig->getAdapter($provider['provider_name'], $apiKey);
+            if (!$adapter) {
+                echo json_encode(['success' => false, 'message' => 'Adapter tidak ditemukan.']);
+                exit;
+            }
+
+            $models = $adapter->fetchAvailableModels($apiKey);
+            echo json_encode(['success' => true, 'models' => $models]);
+            break;
+
+        /* ---------------------------------------------------------
+         * 6. SAVE MODEL
+         * --------------------------------------------------------- */
+        case 'save_model':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+
+            $providerId = (int)($_POST['provider_id'] ?? 0);
+            $modelName = trim($_POST['model_name'] ?? '');
+            $displayName = trim($_POST['display_name'] ?? $modelName);
+            $timeout = (int)($_POST['timeout_seconds'] ?? 10);
+            $maxTokens = (int)($_POST['max_output_tokens'] ?? 600);
+            $temperature = isset($_POST['temperature']) ? (float)$_POST['temperature'] : 0.3;
+            $isDefault = !empty($_POST['is_default']) ? 1 : 0;
+            $isActive = !empty($_POST['is_active']) ? 1 : 0;
+            $modelId = (int)($_POST['model_id'] ?? 0);
+
+            if (empty($modelName) || $providerId <= 0) {
+                echo json_encode(['success' => false, 'message' => 'Provider dan nama model wajib diisi.']);
+                exit;
+            }
+
+            $mId = $aiConfig->saveModel([
+                'id' => $modelId,
+                'provider_id' => $providerId,
+                'model_name' => $modelName,
+                'display_name' => $displayName,
+                'timeout_seconds' => $timeout,
+                'max_output_tokens' => $maxTokens,
+                'temperature' => $temperature,
+                'is_default' => $isDefault,
+                'is_active' => $isActive
+            ]);
+
+            echo json_encode(['success' => true, 'message' => 'Model AI berhasil disimpan!', 'model_id' => $mId]);
+            break;
+
+        /* ---------------------------------------------------------
+         * 7. SET DEFAULT MODEL
+         * --------------------------------------------------------- */
+        case 'set_default_model':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+            $modelId = (int)($_POST['model_id'] ?? 0);
+            $aiConfig->setDefaultModel($modelId);
+            echo json_encode(['success' => true, 'message' => 'Model default berhasil diperbarui!']);
+            break;
+
+        /* ---------------------------------------------------------
+         * 8. TOGGLE MODEL ACTIVE
+         * --------------------------------------------------------- */
+        case 'toggle_model':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+            $modelId = (int)($_POST['model_id'] ?? 0);
+            $active = !empty($_POST['is_active']);
+            $aiConfig->toggleModelActive($modelId, $active);
+            echo json_encode(['success' => true, 'message' => 'Status model berhasil diubah.']);
+            break;
+
+        /* ---------------------------------------------------------
+         * 9. SYSTEM PROMPTS (Save, Activate, Rollback)
+         * --------------------------------------------------------- */
+        case 'save_prompt':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+
+            $promptName = trim($_POST['prompt_name'] ?? 'Prompt nnasa_ca');
+            $content = trim($_POST['prompt_content'] ?? '');
+            $version = trim($_POST['version'] ?? 'v1.1');
+            $status = $_POST['status'] ?? 'draft';
+
+            if (empty($content)) {
+                echo json_encode(['success' => false, 'message' => 'Isi prompt tidak boleh kosong.']);
+                exit;
+            }
+
+            $adminUser = current_user();
+            $newId = $aiConfig->savePrompt([
+                'prompt_name' => $promptName,
+                'prompt_content' => $content,
+                'version' => $version,
+                'status' => $status,
+                'created_by' => $adminUser['id'] ?? null
+            ]);
+
+            echo json_encode(['success' => true, 'message' => 'System prompt versi baru berhasil disimpan!', 'prompt_id' => $newId]);
+            break;
+
+        case 'set_active_prompt':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+            $promptId = (int)($_POST['prompt_id'] ?? 0);
+            $aiConfig->setActivePrompt($promptId);
+            echo json_encode(['success' => true, 'message' => 'System prompt berhasil diaktifkan untuk produksi!']);
+            break;
+
+        /* ---------------------------------------------------------
+         * 10. AI PARAMETERS & USAGE LIMITS
+         * --------------------------------------------------------- */
+        case 'save_parameters':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+
+            $settings = [
+                'ai_temperature' => (float)($_POST['temperature'] ?? 0.3),
+                'ai_max_tokens' => (int)($_POST['max_tokens'] ?? 600),
+                'ai_top_p' => (float)($_POST['top_p'] ?? 0.95),
+                'ai_timeout' => (int)($_POST['timeout'] ?? 10)
+            ];
+            $aiConfig->saveSettings($settings);
+            echo json_encode(['success' => true, 'message' => 'Parameter AI berhasil diperbarui.']);
+            break;
+
+        case 'save_limits':
+            if (!csrf_verify($_POST['csrf_token'] ?? '')) {
+                echo json_encode(['success' => false, 'message' => 'Sesi CSRF tidak valid.']);
+                exit;
+            }
+
+            $settings = [
+                'ai_max_msg_per_user' => (int)($_POST['max_msg_per_user'] ?? 50),
+                'ai_rate_limit_per_minute' => (int)($_POST['rate_limit_per_minute'] ?? 20),
+                'ai_daily_limit' => (int)($_POST['daily_limit'] ?? 1000),
+                'ai_max_message_length' => (int)($_POST['max_message_length'] ?? 1000),
+                'ai_cost_limit_monthly' => (float)($_POST['cost_limit_monthly'] ?? 15.00),
+                'ai_over_quota_policy' => in_array($_POST['over_quota_policy'] ?? '', ['reject', 'fallback_builtin']) ? $_POST['over_quota_policy'] : 'fallback_builtin'
+            ];
+            $aiConfig->saveSettings($settings);
+            echo json_encode(['success' => true, 'message' => 'Batas penggunaan dan biaya berhasil disimpan.']);
+            break;
+
+        /* ---------------------------------------------------------
+         * 11. PLAYGROUND TESTING
+         * --------------------------------------------------------- */
+        case 'playground_test':
+            $userMessage = trim($_POST['message'] ?? '');
+            $providerId = (int)($_POST['provider_id'] ?? 0);
+            $modelId = (int)($_POST['model_id'] ?? 0);
+            $customPrompt = trim($_POST['custom_prompt'] ?? '');
+
+            if (empty($userMessage)) {
+                echo json_encode(['success' => false, 'message' => 'Pesan uji coba wajib diisi.']);
+                exit;
+            }
+
+            $provider = ($providerId > 0) ? $aiConfig->getProviderById($providerId) : $aiConfig->getActiveProvider();
+            $rawModel = trim($_POST['model_id'] ?? '');
+            $model = null;
+            if (is_numeric($rawModel) && (int)$rawModel > 0) {
+                $model = $aiConfig->getModelById((int)$rawModel);
+            } elseif (!empty($rawModel)) {
+                $stmtM = $db->prepare("SELECT m.*, p.display_name AS provider_display, p.provider_name FROM ai_models m LEFT JOIN ai_providers p ON m.provider_id = p.id WHERE m.model_name = ? LIMIT 1");
+                $stmtM->execute([$rawModel]);
+                $model = $stmtM->fetch(PDO::FETCH_ASSOC) ?: null;
+            }
+            if (empty($model)) {
+                $model = $aiConfig->getDefaultModel();
+            }
+
+            if (!$provider || !$model) {
+                echo json_encode(['success' => false, 'message' => 'Provider atau Model aktif belum dikonfigurasi.']);
+                exit;
+            }
+
+            $apiKey = $aiConfig->getDecryptedApiKey($provider['id']);
+            if (empty($apiKey)) {
+                echo json_encode(['success' => false, 'message' => "API Key untuk provider {$provider['display_name']} belum diisi."]);
+                exit;
+            }
+
+            $adapter = $aiConfig->getAdapter($provider['provider_name'], $apiKey);
+            if (!$adapter) {
+                echo json_encode(['success' => false, 'message' => 'Adapter provider tidak tersedia.']);
+                exit;
+            }
+
+            // System prompt
+            $systemInstruction = !empty($customPrompt) ? $customPrompt : '';
+            if (empty($systemInstruction)) {
+                $activePrompt = $aiConfig->getActivePrompt();
+                $systemInstruction = $activePrompt ? $activePrompt['prompt_content'] : '';
+            }
+
+            $params = $model['params'] ?? [];
+            $params['timeout_seconds'] = $model['timeout_seconds'] ?? 10;
+            $params['max_output_tokens'] = $model['max_output_tokens'] ?? 600;
+
+            $start = microtime(true);
+            $res = $adapter->generateContent($userMessage, $systemInstruction, $model['model_name'], $params, $apiKey);
+            $duration = (int)round((microtime(true) - $start) * 1000);
+
+            // Log test run into usage logs
+            $adminUser = current_user();
+            $status = $res['success'] ? 'success' : 'failed';
+            $inTokens = $res['input_tokens'] ?? 0;
+            $outTokens = $res['output_tokens'] ?? 0;
+            $estCost = ($inTokens * 0.00000015) + ($outTokens * 0.0000006);
+
+            $aiConfig->logUsage([
+                'provider_id' => $provider['id'],
+                'model_id' => $model['id'],
+                'user_id' => $adminUser['id'] ?? null,
+                'request_status' => $status,
+                'input_tokens' => $inTokens,
+                'output_tokens' => $outTokens,
+                'latency_ms' => $duration,
+                'estimated_cost' => $estCost,
+                'error_code' => $res['error'] ?? null
+            ]);
+
+            echo json_encode([
+                'success' => $res['success'],
+                'reply' => $res['reply'] ?? '',
+                'error' => $res['error'] ?? null,
+                'latency_ms' => $duration,
+                'input_tokens' => $inTokens,
+                'output_tokens' => $outTokens,
+                'total_tokens' => $inTokens + $outTokens,
+                'provider' => $provider['display_name'],
+                'model' => $model['display_name'],
+                'status' => $status
+            ]);
+            break;
+
+        /* ---------------------------------------------------------
+         * 11b. TEST MODEL DIRECT (Modal Playground Uji Model)
+         * --------------------------------------------------------- */
+        case 'test_prompt':
+        case 'test_model_direct':
+            $userMessage = trim($_POST['message'] ?? ($_POST['prompt'] ?? ''));
+            $modelId = (int)($_POST['model_id'] ?? 0);
+            $providerId = (int)($_POST['provider_id'] ?? 0);
+
+            if (empty($userMessage)) {
+                echo json_encode([
+                    'status' => 'error',
+                    'success' => false,
+                    'message' => 'Pesan / prompt ujian tidak boleh kosong.'
+                ]);
+                exit;
+            }
+
+            $rawModel = trim($_POST['model_id'] ?? '');
+            $model = null;
+            if (is_numeric($rawModel) && (int)$rawModel > 0) {
+                $model = $aiConfig->getModelById((int)$rawModel);
+            } elseif (!empty($rawModel)) {
+                $stmtM = $db->prepare("SELECT m.*, p.display_name AS provider_display, p.provider_name FROM ai_models m LEFT JOIN ai_providers p ON m.provider_id = p.id WHERE m.model_name = ? LIMIT 1");
+                $stmtM->execute([$rawModel]);
+                $model = $stmtM->fetch(PDO::FETCH_ASSOC) ?: null;
+            }
+            if (empty($model)) {
+                $model = $aiConfig->getDefaultModel();
+            }
+            if (!$model) {
+                echo json_encode([
+                    'status' => 'error',
+                    'success' => false,
+                    'message' => 'Model AI tidak ditemukan di database.'
+                ]);
+                exit;
+            }
+
+            $provIdToUse = ($providerId > 0) ? $providerId : ($model['provider_id'] ?? 0);
+            $provider = ($provIdToUse > 0) ? $aiConfig->getProviderById($provIdToUse) : $aiConfig->getActiveProvider();
+
+            if (!$provider) {
+                echo json_encode([
+                    'status' => 'error',
+                    'success' => false,
+                    'message' => 'Provider untuk model ini tidak ditemukan.'
+                ]);
+                exit;
+            }
+
+            $apiKey = $aiConfig->getDecryptedApiKey($provider['id']);
+            if (empty($apiKey)) {
+                echo json_encode([
+                    'status' => 'error',
+                    'success' => false,
+                    'message' => "API Key untuk provider {$provider['display_name']} belum dikonfigurasi."
+                ]);
+                exit;
+            }
+
+            $adapter = $aiConfig->getAdapter($provider['provider_name'], $apiKey);
+            if (!$adapter) {
+                echo json_encode([
+                    'status' => 'error',
+                    'success' => false,
+                    'message' => "Adapter provider {$provider['provider_name']} tidak tersedia."
+                ]);
+                exit;
+            }
+
+            // System prompt
+            $activePrompt = $aiConfig->getActivePrompt();
+            $systemInstruction = $activePrompt ? $activePrompt['prompt_content'] : 'Kamu adalah asisten AI toko aksesoris nnasa_ca. Jawab dengan ramah, singkat, dan tepat.';
+
+            $params = $model['params'] ?? [];
+            $params['timeout_seconds'] = 30; // Batas waktu cURL 30 detik
+            $params['max_output_tokens'] = $model['max_output_tokens'] ?? 800;
+
+            // Periksa dan ganti ID model: jika gemini-3.8-flash ganti ke model valid gemini-1.5-flash
+            $modelNameToUse = $model['model_name'];
+            if (str_contains($modelNameToUse, '3.8')) {
+                $modelNameToUse = 'gemini-1.5-flash';
+            }
+
+            $start = microtime(true);
+            $res = $adapter->generateContent($userMessage, $systemInstruction, $modelNameToUse, $params, $apiKey);
+            $duration = (int)round((microtime(true) - $start) * 1000);
+
+            // Log usage
+            $adminUser = current_user();
+            $statusStr = $res['success'] ? 'success' : 'failed';
+            $inTokens = $res['input_tokens'] ?? 0;
+            $outTokens = $res['output_tokens'] ?? 0;
+            $estCost = ($inTokens * 0.00000015) + ($outTokens * 0.0000006);
+
+            $aiConfig->logUsage([
+                'provider_id' => $provider['id'],
+                'model_id' => $model['id'],
+                'user_id' => $adminUser['id'] ?? null,
+                'request_status' => $statusStr,
+                'input_tokens' => $inTokens,
+                'output_tokens' => $outTokens,
+                'latency_ms' => $duration,
+                'estimated_cost' => $estCost,
+                'error_code' => $res['error'] ?? null
+            ]);
+
+            if ($res['success']) {
+                echo json_encode([
+                    'status' => 'success',
+                    'success' => true,
+                    'data' => $res['reply'],
+                    'reply' => $res['reply'],
+                    'latency_ms' => $duration,
+                    'model' => $model['display_name'],
+                    'provider' => $provider['display_name']
+                ]);
+            } else {
+                echo json_encode([
+                    'status' => 'error',
+                    'success' => false,
+                    'message' => $res['error'] ?? 'Gagal memproses respons dari model AI.',
+                    'error' => $res['error'] ?? null,
+                    'latency_ms' => $duration
+                ]);
+            }
+            break;
+
+        /* ---------------------------------------------------------
+         * 12. GET LOGS
+         * --------------------------------------------------------- */
+        case 'get_logs':
+            $limit = min(100, max(10, (int)($_GET['limit'] ?? 50)));
+            $offset = max(0, (int)($_GET['offset'] ?? 0));
+            $status = !empty($_GET['status']) ? $_GET['status'] : null;
+
+            $logs = $aiConfig->getUsageLogs($limit, $offset, $status);
+            echo json_encode(['success' => true, 'logs' => $logs]);
+            break;
+
+        default:
+            echo json_encode(['success' => false, 'message' => 'Action tidak dikenali.']);
+            break;
+    }
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'Terjadi kesalahan server: ' . $e->getMessage()]);
+}

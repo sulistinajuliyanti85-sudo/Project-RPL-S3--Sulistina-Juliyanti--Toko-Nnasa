@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="id" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Konfigurasi Model AI — Dasbor Admin</title>
+
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Bootstrap 5.3 & Bootstrap Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+  <style>
+    /* ==========================================================================
+       DARK NAVY THEME PALETTE (Inspirasi: smartutbk.ikmi.ac.id/admin/ai)
+       ========================================================================== */
+    :root {
+      --bg-main: #0b0f19;          /* Latar belakang utama (Midnight Navy) */
+      --bg-card: #111a2e;          /* Kartu utama */
+      --bg-card-hover: #141f37;
+      --bg-surface: #090e17;       /* Kotak teks statis, readonly, input */
+      --bg-input: #0d1424;
+      --border-color: #1f2d47;     /* Garis tepi halus */
+      --border-focus: #3b82f6;     /* Biru aksen fokus */
+      
+      --text-white: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+
+      --btn-primary-bg: #2563eb;
+      --btn-primary-hover: #1d4ed8;
+      --btn-outline-border: #243554;
+      --btn-outline-hover: #1a2740;
+
+      --badge-green-bg: rgba(16, 185, 129, 0.15);
+      --badge-green-text: #34d399;
+      --badge-green-border: rgba(16, 185, 129, 0.3);
+
+      --badge-muted-bg: rgba(148, 163, 184, 0.1);
+      --badge-muted-text: #94a3b8;
+      --badge-muted-border: rgba(148, 163, 184, 0.2);
+    }
+
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-white);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    /* Monospace Khusus Nama Model & Masked API Key */
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.88rem;
+      letter-spacing: -0.2px;
+    }
+
+    /* Container Header */
+    .page-title {
+      font-size: 1.85rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: #ffffff;
+    }
+
+    .page-desc {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      max-width: 900px;
+      line-height: 1.6;
+    }
+
+    /* Status Bar Banner */
+    .status-bar-box {
+      background-color: #111a2e;
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 0.85rem 1.25rem;
+    }
+
+    .badge-status-green {
+      background-color: var(--badge-green-bg);
+      color: var(--badge-green-text);
+      border: 1px solid var(--badge-green-border);
+      font-weight: 600;
+      font-size: 0.78rem;
+      padding: 0.35rem 0.65rem;
+      border-radius: 6px;
+    }
+
+    .badge-status-muted {
+      background-color: var(--badge-muted-bg);
+      color: var(--badge-muted-text);
+      border: 1px solid var(--badge-muted-border);
+      font-weight: 600;
+      font-size: 0.78rem;
+      padding: 0.35rem 0.65rem;
+      border-radius: 6px;
+    }
+
+    .btn-reload-catalog {
+      background-color: transparent;
+      border: 1px solid var(--btn-outline-border);
+      color: #cbd5e1;
+      font-size: 0.85rem;
+      font-weight: 500;
+      padding: 0.45rem 1rem;
+      border-radius: 8px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-reload-catalog:hover {
+      background-color: var(--btn-outline-hover);
+      color: #ffffff;
+      border-color: #3b82f6;
+    }
+
+    /* Card AI Feature Configuration */
+    .ai-config-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 1.5rem;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .ai-config-card:hover {
+      border-color: #2b3e61;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    }
+
+    .card-feature-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .badge-menu-control {
+      background-color: rgba(148, 163, 184, 0.08);
+      color: #64748b;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      font-size: 0.72rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 5px;
+      font-weight: 500;
+    }
+
+    .card-feature-desc {
+      font-size: 0.86rem;
+      color: var(--text-muted);
+      min-height: 42px;
+      margin-bottom: 1.25rem;
+    }
+
+    /* Form Labels */
+    .field-label {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 0.35rem;
+      display: block;
+    }
+
+    /* Readonly Box (Menampilkan Model / Kunci Saat Ini) */
+    .current-display-box {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 0.55rem 0.85rem;
+      color: #e2e8f0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      word-break: break-all;
+    }
+
+    /* Form Controls & Dropdown */
+    .form-dark-control,
+    .form-dark-select {
+      background-color: var(--bg-input);
+      border: 1px solid var(--border-color);
+      color: #f1f5f9;
+      font-size: 0.86rem;
+      border-radius: 8px;
+      padding: 0.55rem 0.85rem;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .form-dark-select {
+      background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%2394a3b8' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+      background-repeat: no-repeat;
+      background-position: right 0.75rem center;
+      background-size: 14px 10px;
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      cursor: pointer;
+    }
+
+    .form-dark-select option {
+      background-color: #111a2e;
+      color: #ffffff;
+      padding: 8px;
+    }
+
+    .form-dark-control:focus,
+    .form-dark-select:focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+    }
+
+    .form-dark-control::placeholder {
+      color: var(--text-dim);
+    }
+
+    /* Helper Context Info Below Dropdown */
+    .model-helper-text {
+      font-size: 0.76rem;
+      color: #60a5fa;
+      margin-top: 0.35rem;
+      margin-bottom: 0.85rem;
+      display: block;
+    }
+
+    /* Buttons Styling */
+    .btn-action-primary {
+      background-color: var(--btn-primary-bg);
+      border: 1px solid var(--btn-primary-bg);
+      color: #ffffff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 0.45rem 1rem;
+      border-radius: 7px;
+      transition: background-color 0.2s ease;
+    }
+
+    .btn-action-primary:hover {
+      background-color: var(--btn-primary-hover);
+      border-color: var(--btn-primary-hover);
+      color: #ffffff;
+    }
+
+    .btn-action-outline {
+      background-color: transparent;
+      border: 1px solid var(--btn-outline-border);
+      color: #cbd5e1;
+      font-size: 0.82rem;
+      font-weight: 500;
+      padding: 0.45rem 0.95rem;
+      border-radius: 7px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-action-outline:hover {
+      background-color: var(--btn-outline-hover);
+      color: #ffffff;
+      border-color: #475569;
+    }
+
+    /* Divider */
+    .card-divider {
+      border: 0;
+      height: 1px;
+      background-color: var(--border-color);
+      margin: 1.35rem 0;
+    }
+
+    /* Info Badge File .env */
+    .env-info-box {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      margin-top: -0.5rem;
+      margin-bottom: 0.9rem;
+    }
+
+    .badge-env-tag {
+      background-color: rgba(59, 130, 246, 0.12);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.25);
+      border-radius: 4px;
+      padding: 0.1rem 0.4rem;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container py-4 py-lg-5">
+    
+    <!-- ========================================================================
+         1. BAGIAN HEADER (ATAS)
+         ======================================================================== -->
+    <header class="mb-4">
+      <h1 class="page-title mb-2">Model AI</h1>
+      <p class="page-desc mb-3">
+        Pilih model AI dan API Key untuk membuat soal, pembahasan soal, dan chatbot asisten. Daftar model diambil langsung (real time) dari katalog penyedia. Kunci API tidak pernah ditampilkan utuh — hanya empat karakter terakhirnya.
+      </p>
+
+      <!-- Status Bar: Badges di kiri & Tombol Aksi di kanan -->
+      <div class="status-bar-box d-flex flex-wrap align-items-center justify-content-between gap-3">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <span class="badge-status-green">
+            <i class="bi bi-check-circle-fill me-1"></i> 5 gratis
+          </span>
+          <span class="badge-status-muted">
+            <i class="bi bi-cpu me-1"></i> 394 model
+          </span>
+          <span class="text-secondary small ms-1 d-none d-sm-inline">
+            Daftar terbaru langsung dari penyedia.
+          </span>
+        </div>
+
+        <button type="button" class="btn-reload-catalog d-inline-flex align-items-center gap-2" id="btnReloadCatalog">
+          <i class="bi bi-arrow-repeat" id="reloadIcon"></i>
+          <span>Muat ulang daftar model</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ========================================================================
+         2. BAGIAN KONTEN UTAMA (GRID 3 KOLOM DESKTOP)
+         ======================================================================== -->
+    <main>
+      <div class="row g-4">
+
+        <!-- =================== KARTU 1: MEMBUAT SOAL =================== -->
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="ai-config-card">
+            
+            <!-- Header Kartu -->
+            <div class="d-flex align-items-start justify-content-between mb-1">
+              <h2 class="card-feature-title mb-0">📄 Membuat Soal</h2>
+              <span class="badge-menu-control">diatur di menu ini</span>
+            </div>
+            <p class="card-feature-desc">
+              Dipakai tombol 'Generate dengan AI' di halaman Bank Soal.
+            </p>
+
+            <!-- Bagian Model AI -->
+            <div class="mb-3">
+              <label class="field-label">Model yang dipakai sekarang</label>
+              <div class="current-display-box font-mono">
+                <span>deepseek/deepseek-v4.1-flash</span>
+                <i class="bi bi-check2-circle text-success" title="Aktif"></i>
+              </div>
+
+              <label class="field-label" for="selectModelSoal">Ganti ke model</label>
+              <select class="form-dark-select font-mono" id="selectModelSoal">
+                <option value="deepseek/deepseek-v4.1-flash" selected>deepseek/deepseek-v4.1-flash</option>
+                <option value="deepseek/deepseek-v4-pro">deepseek/deepseek-v4-pro</option>
+                <option value="deepseek/deepseek-chat">deepseek/deepseek-chat</option>
+                <option value="deepseek/deepseek-r1-0528">deepseek/deepseek-r1-0528</option>
+                <option value="meta-llama/llama-3.3-70b-instruct">meta-llama/llama-3.3-70b-instruct</option>
+                <option value="meta-llama/llama-4-maverick">meta-llama/llama-4-maverick</option>
+                <option value="mistral/mistral-large">mistral/mistral-large</option>
+              </select>
+              <span class="model-helper-text">
+                DeepSeek: DeepSeek V4.1 Flash · deepseek · konteks 1.048.576 token
+              </span>
+
+              <div class="d-flex gap-2">
+                <button type="button" class="btn-action-primary">Simpan</button>
+                <button type="button" class="btn-action-outline">Kembalikan ke .env</button>
+              </div>
+            </div>
+
+            <hr class="card-divider">
+
+            <!-- Bagian API Key -->
+            <div>
+              <label class="field-label">API Key yang dipakai</label>
+              <div class="current-display-box font-mono">
+                <span>***************************mkpT</span>
+                <i class="bi bi-shield-lock text-info"></i>
+              </div>
+              <div class="env-info-box">
+                <span class="badge-env-tag">dari file .env</span>
+                <span>Kunci hanya ditampilkan tersamar.</span>
+              </div>
+
+              <label class="field-label" for="inputApiKeySoal">Ganti API Key</label>
+              <div class="mb-3">
+                <input type="text" class="form-dark-control font-mono" id="inputApiKeySoal" placeholder="Tempel API Key baru di sini">
+              </div>
+
+              <div class="d-flex gap-2">
+                <button type="button" class="btn-action-primary">Simpan kunci</button>
+                <button type="button" class="btn-action-outline">Kembalikan ke .env</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- =================== KARTU 2: PEMBAHASAN SOAL (TANYA AI) =================== -->
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="ai-config-card">
+            
+            <!-- Header Kartu -->
+            <div class="d-flex align-items-start justify-content-between mb-1">
+              <h2 class="card-feature-title mb-0">💬 Pembahasan Soal (Tanya AI)</h2>
+              <span class="badge-menu-control">diatur di menu ini</span>
+            </div>
+            <p class="card-feature-desc">
+              Dipakai chat 'Tanya AI tentang soal ini' saat siswa membahas soal.
+            </p>
+
+            <!-- Bagian Model AI -->
+            <div class="mb-3">
+              <label class="field-label">Model yang dipakai sekarang</label>
+              <div class="current-display-box font-mono">
+                <span>poolside/laguna-s-2.1:free</span>
+                <i class="bi bi-check2-circle text-success" title="Aktif"></i>
+              </div>
+
+              <label class="field-label" for="selectModelPembahasan">Ganti ke model</label>
+              <select class="form-dark-select font-mono" id="selectModelPembahasan">
+                <option value="meituan/longcat-2.5:free" selected>meituan/longcat-2.5:free</option>
+                <option value="poolside/laguna-s-2.1:free">poolside/laguna-s-2.1:free</option>
+                <option value="poolside/laguna-xs-2.1:free">poolside/laguna-xs-2.1:free</option>
+                <option value="meta-llama/llama-3.1-8b-instruct">meta-llama/llama-3.1-8b-instruct</option>
+                <option value="meta/muse-spark-1.3">meta/muse-spark-1.3</option>
+                <option value="minimax/minimax-m2.5">minimax/minimax-m2.5</option>
+              </select>
+              <span class="model-helper-text">
+                Meituan: LongCat 2.5 (Free Tier) · konteks 128.000 token
+              </span>
+
+              <div class="d-flex gap-2">
+                <button type="button" class="btn-action-primary">Simpan</button>
+                <button type="button" class="btn-action-outline">Kembalikan ke .env</button>
+              </div>
+            </div>
+
+            <hr class="card-divider">
+
+            <!-- Bagian API Key -->
+            <div>
+              <label class="field-label">API Key yang dipakai</label>
+              <div class="current-display-box font-mono">
+                <span>***************************rw8g</span>
+                <i class="bi bi-shield-lock text-info"></i>
+              </div>
+              <div class="env-info-box">
+                <span class="badge-env-tag">dari file .env</span>
+                <span>Kunci hanya ditampilkan tersamar.</span>
+              </div>
+
+              <label class="field-label" for="inputApiKeyPembahasan">Ganti API Key</label>
+              <div class="mb-3">
+                <input type="text" class="form-dark-control font-mono" id="inputApiKeyPembahasan" placeholder="Tempel API Key baru di sini">
+              </div>
+
+              <div class="d-flex gap-2">
+                <button type="button" class="btn-action-primary">Simpan kunci</button>
+                <button type="button" class="btn-action-outline">Kembalikan ke .env</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- =================== KARTU 3: CHATBOT ASISTEN =================== -->
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="ai-config-card">
+            
+            <!-- Header Kartu -->
+            <div class="d-flex align-items-start justify-content-between mb-1">
+              <h2 class="card-feature-title mb-0">🤖 Chatbot Asisten</h2>
+              <span class="badge-menu-control">diatur di menu ini</span>
+            </div>
+            <p class="card-feature-desc">
+              Dipakai widget chatbot asisten umum (tanya-jawab bebas, tanpa konteks soal).
+            </p>
+
+            <!-- Bagian Model AI -->
+            <div class="mb-3">
+              <label class="field-label">Model yang dipakai sekarang</label>
+              <div class="current-display-box font-mono">
+                <span>poolside/laguna-xs-2.1:free</span>
+                <i class="bi bi-check2-circle text-success" title="Aktif"></i>
+              </div>
+
+              <label class="field-label" for="selectModelChatbot">Ganti ke model</label>
+              <select class="form-dark-select font-mono" id="selectModelChatbot">
+                <option value="meituan/longcat-2.5:free" selected>meituan/longcat-2.5:free</option>
+                <option value="poolside/laguna-xs-2.1:free">poolside/laguna-xs-2.1:free</option>
+                <option value="poolside/laguna-s-2.1:free">poolside/laguna-s-2.1:free</option>
+                <option value="liquid/lfm-2.5-24b-a2b">liquid/lfm-2.5-24b-a2b</option>
+                <option value="meta-llama/llama-4-scout">meta-llama/llama-4-scout</option>
+                <option value="deepseek/deepseek-chat-v3.1">deepseek/deepseek-chat-v3.1</option>
+              </select>
+              <span class="model-helper-text">
+                Meituan: LongCat 2.5 (Free Tier) · respons instan untuk chatbot
+              </span>
+
+              <div class="d-flex gap-2">
+                <button type="button" class="btn-action-primary">Simpan</button>
+                <button type="button" class="btn-action-outline">Kembalikan ke .env</button>
+              </div>
+            </div>
+
+            <hr class="card-divider">
+
+            <!-- Bagian API Key -->
+            <div>
+              <label class="field-label">API Key yang dipakai</label>
+              <div class="current-display-box font-mono">
+                <span>***************************EjE0</span>
+                <i class="bi bi-shield-lock text-info"></i>
+              </div>
+              <div class="env-info-box">
+                <span class="badge-env-tag">dari file .env</span>
+                <span>Kunci hanya ditampilkan tersamar.</span>
+              </div>
+
+              <label class="field-label" for="inputApiKeyChatbot">Ganti API Key</label>
+              <div class="mb-3">
+                <input type="text" class="form-dark-control font-mono" id="inputApiKeyChatbot" placeholder="Tempel API Key baru di sini">
+              </div>
+
+              <div class="d-flex gap-2">
+                <button type="button" class="btn-action-primary">Simpan kunci</button>
+                <button type="button" class="btn-action-outline">Kembalikan ke .env</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </main>
+
+  </div>
+
+  <!-- Interaktivitas Ringan (Simulasi UI) -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      // Tombol Reload Catalog Animasi Putar
+      const btnReload = document.getElementById('btnReloadCatalog');
+      const reloadIcon = document.getElementById('reloadIcon');
+
+      btnReload.addEventListener('click', function () {
+        reloadIcon.classList.add('spin-animation');
+        btnReload.disabled = true;
+        btnReload.querySelector('span').textContent = 'Memperbarui katalog...';
+
+        setTimeout(() => {
+          reloadIcon.classList.remove('spin-animation');
+          btnReload.disabled = false;
+          btnReload.querySelector('span').textContent = 'Muat ulang daftar model';
+          alert('Katalog model AI berhasil diperbarui langsung dari penyedia!');
+        }, 1200);
+      });
+    });
+  </script>
+
+  <style>
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+    .spin-animation {
+      display: inline-block;
+      animation: spin 0.8s linear infinite;
+    }
+  </style>
+
+</body>
+</html>
+
