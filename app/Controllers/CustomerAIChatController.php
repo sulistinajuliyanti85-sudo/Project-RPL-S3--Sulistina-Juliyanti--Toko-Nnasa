@@ -40,11 +40,15 @@ class CustomerAIChatController
     protected string $tableCoupons    = 'coupons';
     protected string $tableReviews    = 'reviews';
 
-    public function __construct(PDO $db, string $aiApiKey, string $aiModel = 'gemini-1.5-flash')
+    public function __construct(PDO $db, string $aiApiKey, string $aiModel = 'gemini-3.5-flash-lite')
     {
         $this->db = $db;
         $this->aiApiKey = self::decryptApiKey($aiApiKey) ?? trim($aiApiKey);
-        $this->aiModel = !empty($aiModel) ? trim($aiModel) : 'gemini-1.5-flash';
+        $cleanModel = !empty($aiModel) ? trim($aiModel) : 'gemini-3.5-flash-lite';
+        if (in_array($cleanModel, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro', ''])) {
+            $cleanModel = 'gemini-3.5-flash-lite';
+        }
+        $this->aiModel = $cleanModel;
     }
 
     /**
@@ -57,7 +61,7 @@ class CustomerAIChatController
         }
 
         $raw = trim($encryptedKey);
-        if (str_starts_with($raw, 'AIzaSy')) {
+        if (str_starts_with($raw, 'AIzaSy') || str_starts_with($raw, 'AQ.')) {
             return $raw;
         }
 
@@ -196,11 +200,14 @@ class CustomerAIChatController
         $databaseContext = $ragResult['context'];
         $extractedData   = $ragResult['data'];
 
-        // 3. COBA PEMANGGILAN GOOGLE GEMINI API (JIKA KUNCI VALID 'AIzaSy')
+        // 4. COBA PEMANGGILAN GOOGLE GEMINI API DENGAN FULL DATABASE GROUNDING
         // -------------------------------------------------------------
         $geminiError = null;
-        if (!empty($this->aiApiKey) && str_starts_with($this->aiApiKey, 'AIzaSy')) {
-            $geminiRes = $this->callGeminiAPI($systemInstruction, $databaseContext, $cleanMessage);
+        if (!empty($this->aiApiKey) && strlen($this->aiApiKey) >= 20) {
+            $fullDbGrounding = $this->buildCompleteStoreDatabaseContext($isAdmin, $userId, $displayName);
+            $combinedGrounding = (!empty($databaseContext) ? "Konteks Spesifik Pertanyaan:\n{$databaseContext}\n\n" : "") . $fullDbGrounding;
+
+            $geminiRes = $this->callGeminiAPI($systemInstruction, $combinedGrounding, $cleanMessage);
             if (isset($geminiRes['status']) && $geminiRes['status'] === 'success') {
                 return [
                     'status'        => 'success',
@@ -214,7 +221,7 @@ class CustomerAIChatController
                 $geminiError = $geminiRes['message'] ?? 'Gemini API Error';
             }
         } else {
-            $geminiError = "Kunci API Gemini belum diatur (harus diawali 'AIzaSy'). Sistem menjawab langsung dari Database RAG Engine.";
+            $geminiError = "Kunci API Gemini belum diatur atau tidak valid. Sistem menjawab langsung dari Database RAG Engine.";
         }
 
         // 4. SMART RAG FALLBACK GENERATOR (SELALU MERESPONS SESUAI DATA DATABASE)
@@ -279,6 +286,247 @@ class CustomerAIChatController
     }
 
     /**
+     * Membangun Konteks Grounding Komprehensif Seluruh Database Toko Nnaco.SA
+     * Mengambil snapshot real-time dari seluruh tabel: orders, products, categories, users, coupons, reviews
+     */
+    public function buildCompleteStoreDatabaseContext(bool $isAdmin, ?int $userId, string $displayName): string
+    {
+        try {
+            // 1. Data Agregat Finansial & Operasional
+            $revenue = (float)$this->db->query("SELECT COALESCE(SUM(total_amount), 0) FROM {$this->tableOrders} WHERE payment_status = 'paid'")->fetchColumn();
+            $revFmt = 'Rp ' . number_format($revenue, 0, ',', '.');
+            $unpaid = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableOrders} WHERE order_status = 'pending'")->fetchColumn();
+            $unpaidAmt = (float)$this->db->query("SELECT COALESCE(SUM(total_amount), 0) FROM {$this->tableOrders} WHERE order_status = 'pending'")->fetchColumn();
+            $unpaidAmtFmt = 'Rp ' . number_format($unpaidAmt, 0, ',', '.');
+            $processing = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableOrders} WHERE order_status = 'processing'")->fetchColumn();
+            $shipped = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableOrders} WHERE order_status = 'shipped'")->fetchColumn();
+            $completed = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableOrders} WHERE order_status IN ('completed', 'delivered')")->fetchColumn();
+            $totalOrders = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableOrders}")->fetchColumn();
+
+            $totalActiveProd = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableProducts} WHERE status = 'active'")->fetchColumn();
+            $totalStock = (int)$this->db->query("SELECT COALESCE(SUM(stock), 0) FROM {$this->tableProducts} WHERE status = 'active'")->fetchColumn();
+            $lowStockCount = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableProducts} WHERE stock <= 5 AND status = 'active'")->fetchColumn();
+            $totalCategories = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableCategories}")->fetchColumn();
+
+            $totalUsers = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableUsers}")->fetchColumn();
+            $totalCustomers = (int)$this->db->query("SELECT COUNT(*) FROM {$this->tableUsers} WHERE role = 'customer'")->fetchColumn();
+
+            $ctx = "=== RINGKASAN DATA RESMI DATABASE TOKO NNACO.SA ===\n";
+            $ctx .= "- METRIK DASBOR TOKO:\n";
+            $ctx .= "  * Total Pendapatan Valid (Lunas): {$revFmt}\n";
+            $ctx .= "  * Total Seluruh Transaksi: {$totalOrders} pesanan\n";
+            $ctx .= "  * Pesanan Belum Bayar: {$unpaid} pesanan (Total Nilai: {$unpaidAmtFmt})\n";
+            $ctx .= "  * Pesanan Perlu Diproses: {$processing} pesanan\n";
+            $ctx .= "  * Pesanan Sedang Dikirim: {$shipped} pesanan\n";
+            $ctx .= "  * Pesanan Selesai/Terkirim: {$completed} pesanan\n";
+            $ctx .= "  * Total Produk Aktif: {$totalActiveProd} model aksesoris\n";
+            $ctx .= "  * Total Persediaan Stok Fisik: {$totalStock} unit\n";
+            $ctx .= "  * Produk Stok Menipis (<= 5 pcs): {$lowStockCount} produk\n";
+            $ctx .= "  * Total Kategori: {$totalCategories} kategori\n";
+            $ctx .= "  * Total Pengguna Terdaftar: {$totalUsers} akun ({$totalCustomers} akun pelanggan)\n\n";
+
+            // 2. Daftar Seluruh Produk Aktif (Katalog Lengkap)
+            $stmtProd = $this->db->query("
+                SELECT p.name, p.price, p.discount_price, p.stock, p.sales_count, c.name as category_name
+                FROM {$this->tableProducts} p
+                LEFT JOIN {$this->tableCategories} c ON p.category_id = c.id
+                WHERE p.status = 'active'
+                ORDER BY p.sales_count DESC
+            ");
+            $products = $stmtProd->fetchAll(PDO::FETCH_ASSOC);
+
+            $ctx .= "- KATALOG SELURUH PRODUK AKSESORIS TOKO:\n";
+            foreach ($products as $p) {
+                $effPrice = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
+                $prFmt = 'Rp ' . number_format($effPrice, 0, ',', '.');
+                $ctx .= "  * {$p['name']} [Kategori: {$p['category_name']}]: Harga {$prFmt}, Sisa Stok: {$p['stock']} pcs, Terjual: {$p['sales_count']} pcs\n";
+            }
+            $ctx .= "\n";
+
+            // 3. Daftar Pembeli / Pelanggan yang Pernah Belanja
+            $stmtBuyers = $this->db->query("
+                SELECT u.name as customer_name, u.email, COUNT(o.id) as total_orders,
+                       COALESCE(SUM(CASE WHEN o.payment_status = 'paid' THEN o.total_amount ELSE 0 END), 0) as total_spend,
+                       MAX(o.created_at) as last_order
+                FROM {$this->tableOrders} o
+                JOIN {$this->tableUsers} u ON o.user_id = u.id
+                GROUP BY u.id, u.name, u.email
+                ORDER BY total_spend DESC, total_orders DESC
+            ");
+            $buyers = $stmtBuyers->fetchAll(PDO::FETCH_ASSOC);
+            $ctx .= "- DAFTAR PEMBELI / PELANGGAN TOKO YANG PERNAH BERBELANJA:\n";
+            foreach ($buyers as $b) {
+                $spFmt = 'Rp ' . number_format($b['total_spend'], 0, ',', '.');
+                $ctx .= "  * {$b['customer_name']} ({$b['email']}): {$b['total_orders']} pesanan, Total Belanja Lunas: {$spFmt}, Terakhir Belanja: {$b['last_order']}\n";
+            }
+            $ctx .= "\n";
+
+            // 4. Daftar 10 Transaksi Pesanan Terbaru
+            $stmtRecent = $this->db->query("
+                SELECT o.order_number, u.name as customer_name, o.total_amount, o.payment_status, o.order_status, o.created_at
+                FROM {$this->tableOrders} o
+                JOIN {$this->tableUsers} u ON o.user_id = u.id
+                ORDER BY o.id DESC
+                LIMIT 10
+            ");
+            $recent = $stmtRecent->fetchAll(PDO::FETCH_ASSOC);
+            $ctx .= "- DAFTAR 10 TRANSAKSI PESANAN TERBARU TOKO:\n";
+            foreach ($recent as $r) {
+                $aFmt = 'Rp ' . number_format($r['total_amount'], 0, ',', '.');
+                $paySt = ($r['payment_status'] === 'paid') ? 'Lunas' : 'Belum Dibayar';
+                $ctx .= "  * Invoice {$r['order_number']}: Pelanggan {$r['customer_name']}, Total {$aFmt}, Pembayaran: {$paySt}, Status: {$r['order_status']}, Tanggal: {$r['created_at']}\n";
+            }
+            $ctx .= "\n";
+
+            // 5. Daftar Kupon Promo Aktif
+            $stmtCoupons = $this->db->query("SELECT code, discount_type, discount_value, minimum_purchase FROM {$this->tableCoupons} WHERE status = 'active'");
+            $coupons = $stmtCoupons->fetchAll(PDO::FETCH_ASSOC);
+            $ctx .= "- VOUCHER & KUPON PROMO AKTIF:\n";
+            foreach ($coupons as $c) {
+                $disc = ($c['discount_type'] === 'percentage') ? $c['discount_value'] . '%' : 'Rp ' . number_format($c['discount_value'], 0, ',', '.');
+                $minB = 'Rp ' . number_format($c['minimum_purchase'], 0, ',', '.');
+                $ctx .= "  * Kode: {$c['code']} (Potongan {$disc}, Min. Belanja: {$minB})\n";
+            }
+            $ctx .= "\n";
+
+            // 6. Layanan Toko
+            $ctx .= "- INFORMASI LAYANAN TOKO:\n";
+            $ctx .= "  * Ekspedisi Pengiriman: SiCepat (Rp 12.000), J&T Express (Rp 14.000), JNE Reguler (Rp 15.000). Semua pesanan memiliki nomor resi terlacak.\n";
+            $ctx .= "  * Metode Pembayaran: QRIS Otomatis (GoPay, OVO, Dana, ShopeePay, BCA, Mandiri), Transfer Bank (BCA, Mandiri, BNI), dan Simulasi Midtrans.\n\n";
+
+            // 7. Ulasan & Testimoni Pelanggan
+            try {
+                $stmtRev = $this->db->query("
+                    SELECT r.rating, r.review_text, p.name as product_name
+                    FROM {$this->tableReviews} r
+                    JOIN {$this->tableProducts} p ON r.product_id = p.id
+                    WHERE r.status = 'approved'
+                    ORDER BY r.id DESC
+                    LIMIT 5
+                ");
+                $recentReviews = $stmtRev ? $stmtRev->fetchAll(PDO::FETCH_ASSOC) : [];
+                if (!empty($recentReviews)) {
+                    $ctx .= "- ULASAN & TESTIMONI PELANGGAN:\n";
+                    foreach ($recentReviews as $rv) {
+                        $ctx .= "  * [Bintang {$rv['rating']}/5] {$rv['product_name']}: \"{$rv['review_text']}\"\n";
+                    }
+                    $ctx .= "\n";
+                }
+            } catch (Throwable $eRev) {
+                // Ignore review query error gracefully
+            }
+
+            // 8. Jika Customer Login: Sisipkan Data Pesanan Pribadinya
+            if (!$isAdmin && !empty($userId)) {
+                $stmtMyOrders = $this->db->prepare("
+                    SELECT order_number, total_amount, payment_status, order_status, created_at
+                    FROM {$this->tableOrders}
+                    WHERE user_id = ?
+                    ORDER BY id DESC
+                    LIMIT 5
+                ");
+                $stmtMyOrders->execute([$userId]);
+                $myOrders = $stmtMyOrders->fetchAll(PDO::FETCH_ASSOC);
+                $ctx .= "\n- RIWAYAT PESANAN PRIBADI USER INI ({$displayName}):\n";
+                if (empty($myOrders)) {
+                    $ctx .= "  * User ini belum memiliki riwayat pesanan.\n";
+                } else {
+                    foreach ($myOrders as $mo) {
+                        $mPay = ($mo['payment_status'] === 'paid') ? 'Lunas' : 'Belum Dibayar';
+                        $mAmt = 'Rp ' . number_format($mo['total_amount'], 0, ',', '.');
+                        $ctx .= "  * {$mo['order_number']}: Total {$mAmt}, Pembayaran: {$mPay}, Status: {$mo['order_status']}\n";
+                    }
+                }
+            }
+
+            return $ctx;
+        } catch (Throwable $e) {
+            return "Data Toko Nnaco.SA (Ringkasan Real-Time): " . $e->getMessage();
+        }
+    }
+
+    /**
+     * Query Seluruh Produk Aktif Toko (Katalog Lengkap & Rincian Stok)
+     */
+    private function queryAllProductsContext(bool $isAdmin): array
+    {
+        try {
+            $stmt = $this->db->query("
+                SELECT p.id, p.name, p.price, p.discount_price, p.stock, p.sales_count, COALESCE(c.name, 'Aksesoris') as category_name
+                FROM {$this->tableProducts} p
+                LEFT JOIN {$this->tableCategories} c ON p.category_id = c.id
+                WHERE p.status = 'active'
+                ORDER BY c.name ASC, p.name ASC
+            ");
+            $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $totalStock = array_sum(array_column($products, 'stock'));
+
+            $context = "Data Katalog Seluruh Produk Toko Nnaco.SA (Total: " . count($products) . " produk, {$totalStock} unit stok):\n";
+            foreach ($products as $p) {
+                $effPrice = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
+                $prFmt = 'Rp ' . number_format($effPrice, 0, ',', '.');
+                $context .= "- {$p['name']} [{$p['category_name']}]: {$prFmt} (Sisa Stok: {$p['stock']} pcs, Terjual: {$p['sales_count']} pcs)\n";
+            }
+
+            return [
+                'intent'  => 'all_products_catalog',
+                'context' => $context,
+                'data'    => [
+                    'products'     => $products,
+                    'total_count'  => count($products),
+                    'total_stock'  => $totalStock,
+                    'is_admin'     => $isAdmin
+                ]
+            ];
+        } catch (Throwable $e) {
+            return ['intent' => 'all_products_catalog', 'context' => 'Data produk: ' . $e->getMessage(), 'data' => []];
+        }
+    }
+
+    /**
+     * Query Layanan Ekspedisi & Pengiriman Toko
+     */
+    private function queryShippingMethodsContext(): array
+    {
+        $context = "Layanan Pengiriman Toko Nnaco.SA:\n"
+                 . "- Ekspedisi 1: SiCepat (Best Seller/Paling Cepat) - Tarif Flat Rp 12.000 (Estimasi 1-2 hari kerja)\n"
+                 . "- Ekspedisi 2: J&T Express - Tarif Flat Rp 14.000 (Estimasi 1-3 hari kerja)\n"
+                 . "- Ekspedisi 3: JNE Reguler - Tarif Flat Rp 15.000 (Estimasi 2-3 hari kerja)\n"
+                 . "- Seluruh paket dipacking rapi dengan bubble wrap tebal dan dilengkapi nomor resi resmi yang dapat dilacak secara real-time di menu Lacak Pesanan.";
+
+        return [
+            'intent'  => 'shipping_inquiry',
+            'context' => $context,
+            'data'    => [
+                'methods' => [
+                    ['name' => 'SiCepat', 'cost' => 12000, 'desc' => '1-2 hari kerja'],
+                    ['name' => 'J&T Express', 'cost' => 14000, 'desc' => '1-3 hari kerja'],
+                    ['name' => 'JNE Reguler', 'cost' => 15000, 'desc' => '2-3 hari kerja']
+                ]
+            ]
+        ];
+    }
+
+    /**
+     * Query Metode Pembayaran Toko
+     */
+    private function queryPaymentMethodsContext(): array
+    {
+        $context = "Metode Pembayaran Toko Nnaco.SA:\n"
+                 . "1. QRIS Instan Otomatis (GoPay, OVO, Dana, ShopeePay, LinkAja, BCA Mobile, Livin' Mandiri, dll)\n"
+                 . "2. Transfer Bank Virtual Account (BCA, Mandiri, BNI)\n"
+                 . "3. Pembayaran Simulasi Midtrans (Verifikasi instan otomatis untuk pengujian)";
+
+        return [
+            'intent'  => 'payment_inquiry',
+            'context' => $context,
+            'data'    => [
+                'methods' => ['QRIS (E-Wallet & Mobile Banking)', 'Transfer Bank (BCA, Mandiri, BNI)', 'Midtrans Payment Simulation']
+            ]
+        ];
+    }
+
+    /**
      * Mesin RAG: Mendeteksi Maksud Pertanyaan & Mengambil Data Terkait dari Database
      * Mendukung Role-Awareness: Admin (Metrik Dasbor Toko) vs Customer (Pesanan Pribadi)
      */
@@ -290,16 +538,182 @@ class CustomerAIChatController
         bool $isAdmin,
         ?array $dashData = null
     ): array {
+        // Normalisasi teks pertanyaan & tangani variasi spasi / typo
+        $norm = ' ' . $normalized . ' ';
+        $norm = str_replace([' di bayar ', ' di pesan '], [' dibayar ', ' dipesan '], $norm);
+        $norm = str_replace('ada siapa saya yang belanja', 'ada siapa saja yang belanja', $norm);
+        $norm = trim($norm);
+
         // =====================================================================
-        // BAGIAN A: KHUSUS ADMINISTRATOR / OWNER (GLOBAL DASHBOARD AWARENESS)
+        // TAHAP 1: PERTANYAAN META UMUM (ULASAN, PENGIRIMAN, BAYAR, PROMO, KATEGORI)
+        // =====================================================================
+
+        // 1. Ulasan / Review / Rating / Testimoni Pelanggan
+        if (
+            str_contains($norm, 'ulasan') ||
+            str_contains($norm, 'review') ||
+            str_contains($norm, 'rating') ||
+            str_contains($norm, 'testimoni') ||
+            str_contains($norm, 'bintang')
+        ) {
+            return $this->queryReviewsContext();
+        }
+
+        // 2. Ekspedisi & Jasa Pengiriman
+        if (
+            str_contains($norm, 'ekspedisi') ||
+            str_contains($norm, 'kurir') ||
+            str_contains($norm, 'pengiriman') ||
+            str_contains($norm, 'ongkir') ||
+            str_contains($norm, 'kirim pakai apa') ||
+            str_contains($norm, 'jasa kirim')
+        ) {
+            return $this->queryShippingMethodsContext();
+        }
+
+        // 3. Metode Pembayaran & Cara Bayar
+        if (
+            str_contains($norm, 'metode pembayaran') ||
+            str_contains($norm, 'cara bayar') ||
+            str_contains($norm, 'bisa bayar pakai apa') ||
+            str_contains($norm, 'bayar pakai apa') ||
+            str_contains($norm, 'transfer bank') ||
+            str_contains($norm, 'rekening') ||
+            str_contains($norm, 'qris')
+        ) {
+            return $this->queryPaymentMethodsContext();
+        }
+
+        // 4. Kupon, Voucher & Promo Diskon
+        if (
+            str_contains($norm, 'promo') ||
+            str_contains($norm, 'diskon') ||
+            str_contains($norm, 'kupon') ||
+            str_contains($norm, 'voucher') ||
+            str_contains($norm, 'potongan') ||
+            str_contains($norm, 'cashback')
+        ) {
+            return $this->queryPromosContext();
+        }
+
+        // 5. Kategori Produk Aksesoris
+        if (
+            str_contains($norm, 'kategori') ||
+            str_contains($norm, 'jenis aksesoris') ||
+            str_contains($norm, 'macam aksesoris')
+        ) {
+            return $this->queryCategoriesContext();
+        }
+
+        // 6. Produk Terlaris (Best Seller)
+        if (
+            str_contains($norm, 'terlaris') ||
+            str_contains($norm, 'best seller') ||
+            str_contains($norm, 'bestseller') ||
+            str_contains($norm, 'paling laku') ||
+            str_contains($norm, 'paling banyak dibeli') ||
+            str_contains($norm, 'top seller')
+        ) {
+            return $this->queryBestSellerProductsContext();
+        }
+
+        // 7. Produk Stok Menipis / Kritis / Mau Habis
+        if (
+            str_contains($norm, 'menipis') ||
+            str_contains($norm, 'kritis') ||
+            str_contains($norm, 'hampir habis') ||
+            str_contains($norm, 'mau habis') ||
+            str_contains($norm, 'sisa sedikit') ||
+            str_contains($norm, 'stok habis') ||
+            str_contains($norm, 'restock') ||
+            str_contains($norm, 'kehabisan stok')
+        ) {
+            return $this->queryLowStockProductsContext();
+        }
+
+        // 8. Produk Termurah / Termahal
+        if (str_contains($norm, 'termurah') || str_contains($norm, 'paling murah') || str_contains($norm, 'harga terendah')) {
+            return $this->queryCheapestProductsContext();
+        }
+        if (str_contains($norm, 'termahal') || str_contains($norm, 'paling mahal') || str_contains($norm, 'harga tertinggi') || str_contains($norm, 'paling mewah')) {
+            return $this->queryMostExpensiveProductsContext();
+        }
+
+        // 9. Total Pengguna / User / Member / Pelanggan Terdaftar
+        if (
+            str_contains($norm, 'total user') ||
+            str_contains($norm, 'total pengguna') ||
+            str_contains($norm, 'total member') ||
+            str_contains($norm, 'total pelanggan') ||
+            str_contains($norm, 'jumlah user') ||
+            str_contains($norm, 'jumlah pengguna') ||
+            str_contains($norm, 'jumlah member') ||
+            str_contains($norm, 'jumlah pelanggan') ||
+            str_contains($norm, 'berapa pelanggan terdaftar') ||
+            str_contains($norm, 'berapa user') ||
+            str_contains($norm, 'banyak pengguna')
+        ) {
+            return $this->queryTotalUsersContext();
+        }
+
+        // 10. Daftar Seluruh Produk Aktif (Katalog Lengkap & Rincian Stok)
+        if (
+            str_contains($norm, 'daftar semua produk') ||
+            str_contains($norm, 'semua produk dan stok') ||
+            str_contains($norm, 'daftar produk') ||
+            str_contains($norm, 'list produk') ||
+            str_contains($norm, 'katalog produk') ||
+            str_contains($norm, 'stok seluruh produk') ||
+            str_contains($norm, 'ada produk apa saja') ||
+            str_contains($norm, 'produk apa saja') ||
+            str_contains($norm, 'barang apa saja')
+        ) {
+            return $this->queryAllProductsContext($isAdmin);
+        }
+
+        // 11. Daftar Pembeli / Pelanggan yang Berbelanja di Toko (Siapa Saja yang Belanja)
+        if (
+            str_contains($norm, 'siapa yang belanja') ||
+            str_contains($norm, 'siapa saja yang belanja') ||
+            str_contains($norm, 'siapa saya yang belanja') ||
+            str_contains($norm, 'daftar pembeli') ||
+            str_contains($norm, 'siapa yang beli') ||
+            str_contains($norm, 'siapa pelanggan yang belanja') ||
+            str_contains($norm, 'siapa yang belanja paling banyak') ||
+            str_contains($norm, 'pembeli terbanyak') ||
+            str_contains($norm, 'siapa aja yang belanja') ||
+            str_contains($norm, 'siapa customer yang belanja') ||
+            ($isAdmin && (str_contains($norm, 'pembeli') || str_contains($norm, 'yang belanja')))
+        ) {
+            return $this->queryStoreBuyersContext($norm);
+        }
+
+        // 12. Pencarian Pelanggan Tertentu atau Nomor Invoice
+        $stmtCustomerNames = $this->db->query("SELECT DISTINCT LOWER(name) FROM {$this->tableUsers}");
+        $custNames = $stmtCustomerNames->fetchAll(PDO::FETCH_COLUMN);
+        $matchedCust = null;
+        foreach ($custNames as $cn) {
+            $first = explode(' ', trim($cn))[0];
+            if (strlen($first) >= 3 && str_contains($norm, $first)) {
+                $matchedCust = $first;
+                break;
+            }
+        }
+        if ($matchedCust || preg_match('/\bnna-[\w-]+\b/i', $norm)) {
+            return $this->queryStoreBuyersContext($norm);
+        }
+
+        // =====================================================================
+        // TAHAP 2: KHUSUS ADMINISTRATOR (METRIK DASBOR GLOBAL)
         // =====================================================================
         if ($isAdmin && !empty($dashData)) {
-            // 1. Admin bertanya "pesanan belum dibayar" / "belum bayar" / "menunggu pembayaran"
+            // Pesanan Belum Dibayar
             if (
-                str_contains($normalized, 'belum dibayar') ||
-                str_contains($normalized, 'belum bayar') ||
-                str_contains($normalized, 'menunggu pembayaran') ||
-                (str_contains($normalized, 'pesanan') && str_contains($normalized, 'bayar'))
+                str_contains($norm, 'belum dibayar') ||
+                str_contains($norm, 'belum bayar') ||
+                str_contains($norm, 'menunggu pembayaran') ||
+                str_contains($norm, 'unpaid') ||
+                (str_contains($norm, 'pesanan') && str_contains($norm, 'bayar'))
             ) {
                 $context = "Data Dasbor Admin (Pesanan Belum Bayar Real-Time):\n"
                          . "- Pesanan Belum Bayar Toko: {$dashData['pesanan_belum_bayar']} pesanan\n"
@@ -313,12 +727,13 @@ class CustomerAIChatController
                 ];
             }
 
-            // 2. Admin bertanya Total Pendapatan / Omzet Toko
+            // Total Pendapatan / Omzet
             if (
-                str_contains($normalized, 'pendapatan') ||
-                str_contains($normalized, 'omzet') ||
-                str_contains($normalized, 'omset') ||
-                str_contains($normalized, 'penjualan')
+                str_contains($norm, 'pendapatan') ||
+                str_contains($norm, 'omzet') ||
+                str_contains($norm, 'omset') ||
+                str_contains($norm, 'penjualan') ||
+                str_contains($norm, 'uang masuk')
             ) {
                 $context = "Data Dasbor Admin (Total Pendapatan Valid Toko):\n"
                          . "- Total Pendapatan Valid (Lunas): {$dashData['total_pendapatan_fmt']}\n"
@@ -331,46 +746,13 @@ class CustomerAIChatController
                 ];
             }
 
-            // 3. Admin bertanya Produk Aktif
+            // Pesanan Perlu Diproses / Siap Dikirim
             if (
-                str_contains($normalized, 'produk aktif') ||
-                str_contains($normalized, 'total produk') ||
-                str_contains($normalized, 'jumlah produk')
-            ) {
-                $context = "Data Dasbor Admin (Produk Aktif):\n"
-                         . "- Total Produk Aktif: {$dashData['total_produk_aktif']} model\n"
-                         . "- Total Unit Stok: {$dashData['total_stok']} unit\n"
-                         . "- Total Kategori: {$dashData['total_kategori']} kategori\n";
-                return [
-                    'intent'  => 'admin_active_products',
-                    'context' => $context,
-                    'data'    => $dashData
-                ];
-            }
-
-            // 4. Admin bertanya Total Unit Stok / Persediaan Toko
-            if (
-                str_contains($normalized, 'unit stok') ||
-                str_contains($normalized, 'total stok') ||
-                str_contains($normalized, 'stok toko') ||
-                str_contains($normalized, 'jumlah stok')
-            ) {
-                $context = "Data Dasbor Admin (Persediaan Stok Toko):\n"
-                         . "- Total Unit Stok: {$dashData['total_stok']} unit\n"
-                         . "- Total Produk Aktif: {$dashData['total_produk_aktif']} model\n"
-                         . "- Stok Menipis (<= 5 unit): {$dashData['stok_menipis']} produk\n";
-                return [
-                    'intent'  => 'admin_stock_summary',
-                    'context' => $context,
-                    'data'    => $dashData
-                ];
-            }
-
-            // 5. Admin bertanya Pesanan Perlu Diproses / Siap Dikirim
-            if (
-                str_contains($normalized, 'perlu diproses') ||
-                str_contains($normalized, 'perlu dikirim') ||
-                str_contains($normalized, 'diproses')
+                str_contains($norm, 'perlu diproses') ||
+                str_contains($norm, 'perlu dikirim') ||
+                str_contains($norm, 'diproses') ||
+                str_contains($norm, 'dikemas') ||
+                str_contains($norm, 'packing')
             ) {
                 $context = "Data Dasbor Admin (Pesanan Perlu Diproses):\n"
                          . "- Pesanan Perlu Diproses: {$dashData['pesanan_perlu_diproses']} pesanan\n"
@@ -383,11 +765,47 @@ class CustomerAIChatController
                 ];
             }
 
-            // 6. Admin bertanya Pesanan Toko Secara Umum
+            // Produk Aktif Toko
             if (
-                str_contains($normalized, 'pesanan masuk') ||
-                str_contains($normalized, 'total pesanan') ||
-                (str_contains($normalized, 'berapa') && str_contains($normalized, 'pesanan'))
+                str_contains($norm, 'produk aktif') ||
+                str_contains($norm, 'total produk') ||
+                str_contains($norm, 'jumlah produk')
+            ) {
+                $context = "Data Dasbor Admin (Produk Aktif):\n"
+                         . "- Total Produk Aktif: {$dashData['total_produk_aktif']} model\n"
+                         . "- Total Unit Stok: {$dashData['total_stok']} unit\n"
+                         . "- Total Kategori: {$dashData['total_kategori']} kategori\n";
+                return [
+                    'intent'  => 'admin_active_products',
+                    'context' => $context,
+                    'data'    => $dashData
+                ];
+            }
+
+            // Total Unit Stok Persediaan Toko
+            if (
+                str_contains($norm, 'unit stok') ||
+                str_contains($norm, 'total stok') ||
+                str_contains($norm, 'stok toko') ||
+                str_contains($norm, 'jumlah stok') ||
+                str_contains($norm, 'persediaan')
+            ) {
+                $context = "Data Dasbor Admin (Persediaan Stok Toko):\n"
+                         . "- Total Unit Stok: {$dashData['total_stok']} unit\n"
+                         . "- Total Produk Aktif: {$dashData['total_produk_aktif']} model\n"
+                         . "- Stok Menipis (<= 5 unit): {$dashData['stok_menipis']} produk\n";
+                return [
+                    'intent'  => 'admin_stock_summary',
+                    'context' => $context,
+                    'data'    => $dashData
+                ];
+            }
+
+            // Pesanan Toko Secara Umum
+            if (
+                str_contains($norm, 'pesanan masuk') ||
+                str_contains($norm, 'total pesanan') ||
+                (str_contains($norm, 'berapa') && str_contains($norm, 'pesanan'))
             ) {
                 $context = "Data Dasbor Admin (Ringkasan Pesanan Toko):\n"
                          . "- Total Seluruh Pesanan: {$dashData['total_pesanan']} transaksi\n"
@@ -400,220 +818,99 @@ class CustomerAIChatController
                 ];
             }
 
-            // 7. Admin bertanya Siapa Saja yang Belanja / Daftar Pembeli / Pelanggan Toko
-            // Mendeteksi juga typo umum: "ada siapa saya yang belanja di toko saya" (saya -> saja)
+            // Pesanan Terbaru
             if (
-                str_contains($normalized, 'belanja') ||
-                str_contains($normalized, 'beli') ||
-                str_contains($normalized, 'pembeli') ||
-                str_contains($normalized, 'pelanggan') ||
-                str_contains($normalized, 'customer') ||
-                str_contains($normalized, 'siapa yang pesan') ||
-                str_contains($normalized, 'siapa yang order') ||
-                str_contains($normalized, 'siapa yang beli') ||
-                str_contains($normalized, 'siapa aja yang') ||
-                str_contains($normalized, 'siapa saja yang')
-            ) {
-                return $this->queryStoreBuyersContext($normalized);
-            }
-
-            // 8. Admin bertanya Total Pengguna / User Terdaftar
-            if (
-                str_contains($normalized, 'user') ||
-                str_contains($normalized, 'pengguna') ||
-                str_contains($normalized, 'member')
-            ) {
-                return $this->queryTotalUsersContext();
-            }
-
-            // 9. Admin bertanya Pesanan / Transaksi Terbaru
-            if (
-                str_contains($normalized, 'terbaru') ||
-                str_contains($normalized, 'terakhir') ||
-                str_contains($normalized, 'baru masuk')
+                str_contains($norm, 'terbaru') ||
+                str_contains($norm, 'terakhir') ||
+                str_contains($norm, 'baru masuk')
             ) {
                 return $this->queryRecentOrdersContext();
             }
+        }
 
-            // 10. Admin mencari pesanan pelanggan tertentu atau nomor invoice (misal: "pesanan nizar", "pesanan clara", "invoice NNA-xxx")
-            $stmtCustomerNames = $this->db->query("SELECT DISTINCT LOWER(name) FROM {$this->tableUsers}");
-            $custNames = $stmtCustomerNames->fetchAll(PDO::FETCH_COLUMN);
-
-            $matchedCust = null;
-            foreach ($custNames as $cn) {
-                $first = explode(' ', trim($cn))[0];
-                if (strlen($first) >= 3 && str_contains($normalized, $first)) {
-                    $matchedCust = $first;
-                    break;
-                }
+        // =====================================================================
+        // TAHAP 3: KHUSUS CUSTOMER / PELANGGAN
+        // =====================================================================
+        if (!$isAdmin) {
+            // Pesanan Pribadi Pelanggan
+            if (
+                str_contains($norm, 'pesanan saya') ||
+                str_contains($norm, 'pesanan ku') ||
+                str_contains($norm, 'orderan saya') ||
+                str_contains($norm, 'status pesanan') ||
+                str_contains($norm, 'lacak pesanan') ||
+                str_contains($norm, 'resi saya') ||
+                (str_contains($norm, 'pesanan') && !str_contains($norm, 'produk')) ||
+                str_contains($norm, 'belum dibayar') ||
+                str_contains($norm, 'belum bayar')
+            ) {
+                return $this->queryUserOrdersContext($userId, $displayName);
             }
 
-            if ($matchedCust || preg_match('/\bnna-[\w-]+\b/i', $normalized)) {
-                return $this->queryStoreBuyersContext($normalized);
+            // Pertanyaan Jumlah Produk Umum
+            if (
+                str_contains($norm, 'jumlah produk') ||
+                str_contains($norm, 'banyak produk') ||
+                str_contains($norm, 'total produk') ||
+                str_contains($norm, 'ada berapa produk') ||
+                str_contains($norm, 'ada berapa barang') ||
+                str_contains($norm, 'ada apa saja') ||
+                str_contains($norm, 'jual apa saja')
+            ) {
+                return $this->queryCustomerProductCountContext($displayName);
             }
         }
 
         // =====================================================================
-        // BAGIAN B: PELANGGAN (CUSTOMER) ATAU PERTANYAAN UMUM
+        // TAHAP 4: IDENTITAS ATAU PENCARIAN PRODUK
         // =====================================================================
 
-        // 1. Pertanyaan Pesanan Pribadi Pelanggan (HANYA JIKA BUKAN ADMIN)
-        if (!$isAdmin && (
-            str_contains($normalized, 'pesanan') ||
-            str_contains($normalized, 'belum dibayar') ||
-            str_contains($normalized, 'belum bayar') ||
-            str_contains($normalized, 'transaksi') ||
-            str_contains($normalized, 'tagihan') ||
-            str_contains($normalized, 'order') ||
-            str_contains($normalized, 'bayar') ||
-            str_contains($normalized, 'lacak') ||
-            str_contains($normalized, 'resi')
-        )) {
-            return $this->queryUserOrdersContext($userId, $displayName);
-        }
+        // Identitas Pengguna ("Siapa Saya") - Hanya jika murni tanya nama diri
+        $isPureIdentity = (
+            str_contains($norm, 'siapa saya') ||
+            str_contains($norm, 'siapa aku') ||
+            str_contains($norm, 'nama saya') ||
+            str_contains($norm, 'profil saya') ||
+            preg_match('/\bsiapa\s+(saya|aku|nama\s*ku)\b/i', $norm)
+        ) && !str_contains($norm, 'belanja') && !str_contains($norm, 'toko');
 
-        // 2. Pertanyaan Umum Jumlah / Banyak Produk Toko (General Inquiry)
-        // Menangani: "ada berapa jumlah produk di toko ini", "banyak produk", "total barang", "ada apa saja", "jual apa aja"
-        if (
-            str_contains($normalized, 'jumlah produk') ||
-            str_contains($normalized, 'banyak produk') ||
-            str_contains($normalized, 'total produk') ||
-            str_contains($normalized, 'total barang') ||
-            str_contains($normalized, 'banyak barang') ||
-            str_contains($normalized, 'jumlah barang') ||
-            str_contains($normalized, 'ada berapa produk') ||
-            str_contains($normalized, 'ada berapa barang') ||
-            str_contains($normalized, 'ada berapa macam') ||
-            str_contains($normalized, 'ada berapa jenis') ||
-            str_contains($normalized, 'berapa produk') ||
-            str_contains($normalized, 'berapa barang') ||
-            str_contains($normalized, 'ada apa saja') ||
-            str_contains($normalized, 'ada apa aja') ||
-            str_contains($normalized, 'barang apa saja') ||
-            str_contains($normalized, 'produk apa saja') ||
-            str_contains($normalized, 'koleksi apa saja') ||
-            str_contains($normalized, 'koleksi toko') ||
-            str_contains($normalized, 'jual apa saja') ||
-            str_contains($normalized, 'jual apa aja') ||
-            str_contains($normalized, 'katalog toko') ||
-            preg_match('/(?:ada\s+berapa\s+(?:jumlah|total|banyak|macam|jenis|koleksi|produk|barang|item|aksesoris))/i', $normalized) ||
-            preg_match('/(?:berapa\s+(?:banyak|jumlah|total|macam|jenis)\s+(?:produk|barang|koleksi|item|aksesoris))/i', $normalized) ||
-            preg_match('/(?:ada\s+(?:apa\s+(?:saja|aja)|produk\s+apa|barang\s+apa))/i', $normalized) ||
-            preg_match('/(?:jual\s+(?:apa\s+(?:saja|aja)|produk\s+apa|barang\s+apa))/i', $normalized)
-        ) {
-            return $this->queryCustomerProductCountContext($displayName);
-        }
-
-        // 3. Pertanyaan Produk Terlaris / Best Seller
-        if (
-            str_contains($normalized, 'laris') ||
-            str_contains($normalized, 'terlaris') ||
-            str_contains($normalized, 'best seller') ||
-            str_contains($normalized, 'bestseller') ||
-            str_contains($normalized, 'paling laku') ||
-            str_contains($normalized, 'populer') ||
-            str_contains($normalized, 'favorit') ||
-            str_contains($normalized, 'rekomendasi')
-        ) {
-            return $this->queryBestSellerProductsContext();
-        }
-
-        // 4. Pertanyaan Produk Stok Menipis / Kritis / Habis
-        if (
-            str_contains($normalized, 'menipis') ||
-            str_contains($normalized, 'kritis') ||
-            str_contains($normalized, 'hampir habis') ||
-            str_contains($normalized, 'stok habis') ||
-            str_contains($normalized, 'restock')
-        ) {
-            return $this->queryLowStockProductsContext();
-        }
-
-        // 5. Pertanyaan Produk Termurah / Termahal
-        if (str_contains($normalized, 'termurah') || str_contains($normalized, 'paling murah')) {
-            return $this->queryCheapestProductsContext();
-        }
-        if (str_contains($normalized, 'termahal') || str_contains($normalized, 'paling mahal') || str_contains($normalized, 'premium')) {
-            return $this->queryMostExpensiveProductsContext();
-        }
-
-        // 6. Pertanyaan Kategori Aksesoris Toko
-        if (str_contains($normalized, 'kategori') || str_contains($normalized, 'jenis aksesoris') || str_contains($normalized, 'koleksi apa saja')) {
-            return $this->queryCategoriesContext();
-        }
-
-        // 7. Pertanyaan Voucher, Kupon & Promo
-        if (
-            str_contains($normalized, 'promo') ||
-            str_contains($normalized, 'diskon') ||
-            str_contains($normalized, 'kupon') ||
-            str_contains($normalized, 'voucher') ||
-            str_contains($normalized, 'potongan') ||
-            str_contains($normalized, 'cashback')
-        ) {
-            return $this->queryPromosContext();
-        }
-
-        // 8. Pertanyaan Ulasan & Review Pelanggan
-        if (str_contains($normalized, 'ulasan') || str_contains($normalized, 'review') || str_contains($normalized, 'rating') || str_contains($normalized, 'testimoni')) {
-            return $this->queryReviewsContext();
-        }
-
-        // 9. Pertanyaan Identitas Pengguna ("siapa saya") - Pastikan tidak ada konteks transaksi/belanja
-        $isAboutStoreOrShopping = str_contains($normalized, 'belanja') ||
-                                  str_contains($normalized, 'beli') ||
-                                  str_contains($normalized, 'order') ||
-                                  str_contains($normalized, 'toko') ||
-                                  str_contains($normalized, 'produk') ||
-                                  str_contains($normalized, 'transaksi') ||
-                                  str_contains($normalized, 'pesanan');
-
-        if (!$isAboutStoreOrShopping && (
-            str_contains($normalized, 'siapa saya') ||
-            str_contains($normalized, 'siapa aku') ||
-            str_contains($normalized, 'nama saya') ||
-            preg_match('/\bsiapa\s+(saya|aku|nama\s*ku)\b/i', $normalized)
-        )) {
+        if ($isPureIdentity) {
             $context = $isLoggedIn
                 ? "Data Identitas: Pengguna saat ini sudah login dengan nama {$displayName} (User ID: {$userId}, Peran: " . ($isAdmin ? 'Admin' : 'Customer') . ")."
                 : "Data Identitas: Pengguna saat ini belum login (Pengunjung/Guest).";
             return ['intent' => 'identity_inquiry', 'context' => $context, 'data' => ['is_logged_in' => $isLoggedIn, 'is_admin' => $isAdmin]];
         }
 
-        // 10. Pencarian Spesifik Produk / Stok (Misal: jedai, kalung, cincin, anting)
+        // Pencarian Produk Spesifik via Kata Kunci (Jedai, Kalung, Cincin, Gelang, Anting, Bros, dll)
         if (
-            str_contains($normalized, 'stok') ||
-            str_contains($normalized, 'produk') ||
-            str_contains($normalized, 'harga') ||
-            str_contains($normalized, 'ready') ||
-            str_contains($normalized, 'tersedia') ||
-            str_contains($normalized, 'cari') ||
-            str_contains($normalized, 'jual') ||
-            str_starts_with($normalized, 'ada ') ||
-            str_contains($normalized, ' ada ') ||
-            preg_match('/(?:jedai|jepit|kalung|cincin|anting|gelang|bros|brooch|scrunchie|aksesoris)/i', $normalized)
+            str_contains($norm, 'stok') ||
+            str_contains($norm, 'produk') ||
+            str_contains($norm, 'harga') ||
+            str_contains($norm, 'ready') ||
+            str_contains($norm, 'tersedia') ||
+            str_contains($norm, 'cari') ||
+            str_contains($norm, 'jual') ||
+            str_starts_with($norm, 'ada ') ||
+            str_contains($norm, ' ada ') ||
+            preg_match('/(?:jedai|jepit|kalung|cincin|anting|gelang|bros|brooch|scrunchie|aksesoris|gold|silver|titanium|pearl|mutiara|vintage|korea|flower|butterfly)/i', $norm)
         ) {
-            return $this->querySpecificProductsContext($normalized, $displayName);
+            return $this->querySpecificProductsContext($norm, $displayName);
         }
 
-        // 11. Default: Snapshot Komprehensif Toko
+        // Fallback default
         if ($isAdmin && !empty($dashData)) {
-            $context = "Data Dasbor Toko Nnaco.SA (Ringkasan Real-Time):\n"
+            $context = "Data Dasbor Admin:\n"
                      . "- Total Pendapatan Valid: {$dashData['total_pendapatan_fmt']}\n"
-                     . "- Pesanan Belum Bayar: {$dashData['pesanan_belum_bayar']} pesanan\n"
-                     . "- Pesanan Perlu Diproses: {$dashData['pesanan_perlu_diproses']} pesanan\n"
-                     . "- Total Produk Aktif: {$dashData['total_produk_aktif']} model\n"
-                     . "- Total Unit Stok: {$dashData['total_stok']} unit\n"
-                     . "- Total Kategori: {$dashData['total_kategori']} kategori\n";
+                     . "- Pesanan Belum Bayar: {$dashData['pesanan_belum_bayar']}\n"
+                     . "- Pesanan Perlu Diproses: {$dashData['pesanan_perlu_diproses']}\n"
+                     . "- Total Produk Aktif: {$dashData['total_produk_aktif']}\n"
+                     . "- Total Unit Stok: {$dashData['total_stok']}\n"
+                     . "- Total Kategori: {$dashData['total_kategori']}";
             return ['intent' => 'admin_dashboard_overview', 'context' => $context, 'data' => $dashData];
         }
 
         return $this->queryStoreOverviewContext();
     }
-
-    /**
-     * Query Data Pelanggan yang Belanja / Daftar Pembeli di Toko
-     */
     private function queryStoreBuyersContext(string $normalizedMessage): array
     {
         try {
@@ -1059,7 +1356,7 @@ class CustomerAIChatController
     {
         try {
             $stmt = $this->db->query("
-                SELECT r.rating, r.comment, p.name as product_name, u.name as customer_name
+                SELECT r.rating, r.review_text as comment, p.name as product_name, u.name as customer_name
                 FROM {$this->tableReviews} r
                 JOIN {$this->tableProducts} p ON r.product_id = p.id
                 LEFT JOIN {$this->tableUsers} u ON r.user_id = u.id
@@ -1308,9 +1605,11 @@ class CustomerAIChatController
         string $databaseContext, 
         string $normalized
     ): string {
+        $prefix = $isAdmin ? "Halo Admin **{$displayName}**! " : "Halo Kak **{$displayName}**! ";
+
         switch ($intent) {
             // =================================================================
-            // KASUS-KASUS KHUSUS ADMIN (ROLE-AWARE DASBOR METRIK TOKO)
+            // KASUS DASBOR & BISNIS ADMIN (METRIK TOKO)
             // =================================================================
             case 'admin_unpaid_orders':
                 $pesanan = $data['pesanan_belum_bayar'] ?? 0;
@@ -1327,7 +1626,7 @@ class CustomerAIChatController
                 $prod = $data['total_produk_aktif'] ?? 0;
                 $kat = $data['total_kategori'] ?? 0;
                 $stok = $data['total_stok'] ?? 0;
-                return "Halo Admin **{$displayName}**! 📦 Saat ini toko memiliki **{$prod} produk aktif** yang tersebar di {$kat} kategori dengan total persediaan {$stok} unit stok.";
+                return "Halo Admin **{$displayName}**! 📦 Saat ini toko memiliki **{$prod} produk aktif** yang tersebar di {$kat} kategori dengan total persediaan {$stok} unit stok fisik.";
 
             case 'admin_stock_summary':
                 $stok = $data['total_stok'] ?? 0;
@@ -1393,7 +1692,7 @@ class CustomerAIChatController
                 $tot = $data['total_users'] ?? 0;
                 $cust = $data['total_customers'] ?? 0;
                 $adm = $data['total_admins'] ?? 0;
-                return "Halo Admin **{$displayName}**! 👥 Saat ini di database toko **Nnaco.SA** terdapat total **{$tot} pengguna terdaftar** (terdiri dari **{$cust} akun pelanggan** dan {$adm} akun tim pengelola/admin).";
+                return $prefix . "👥 Saat ini di database toko **Nnaco.SA** terdapat total **{$tot} pengguna terdaftar** (terdiri dari **{$cust} akun pelanggan** dan {$adm} akun tim pengelola/admin).";
 
             case 'admin_recent_orders':
                 $recentOrders = $data ?? [];
@@ -1409,21 +1708,119 @@ class CustomerAIChatController
                 }
                 return "Halo Admin **{$displayName}**! Belum ada riwayat pesanan terbaru di toko.";
 
-            case 'store_statistics':
-                if ($isAdmin) {
-                    $rev = $data['revenue'] ?? 'Rp 0';
-                    $tot = $data['total'] ?? 0;
-                    $pend = $data['pending'] ?? 0;
-                    $proc = $data['processing'] ?? 0;
-                    $ship = $data['shipped'] ?? 0;
-                    return "Halo Admin **{$displayName}**! 📊 Berikut ringkasan performa toko **Nnaco.SA** saat ini:\n\n"
-                         . "• **Total Omzet Lunas**: {$rev}\n"
-                         . "• **Total Pesanan Masuk**: {$tot} transaksi\n"
-                         . "• **Perlu Diproses/Dikirim**: {$proc} pesanan ({$ship} sedang di jalan)\n"
-                         . "• **Menunggu Pembayaran**: {$pend} pesanan\n\n"
-                         . "Ada data spesifik lain yang ingin kamu cek? 💕";
+            // =================================================================
+            // KATALOG SELURUH PRODUK
+            // =================================================================
+            case 'all_products_catalog':
+                $prods = $data['products'] ?? [];
+                $tot = $data['total_count'] ?? count($prods);
+                $stok = $data['total_stock'] ?? 0;
+                if (!empty($prods)) {
+                    $lines = [];
+                    foreach ($prods as $p) {
+                        $price = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
+                        $prFmt = 'Rp ' . number_format($price, 0, ',', '.');
+                        $lines[] = "• **{$p['name']}** [{$p['category_name']}] - {$prFmt} (Stok: {$p['stock']} pcs)";
+                    }
+                    $listStr = implode("\n", $lines);
+                    if ($isAdmin) {
+                        return "Halo Admin **{$displayName}**! 📦 Berikut daftar lengkap seluruh **{$tot} produk aktif** dan stok fisik di toko **Nnaco.SA** (Total persediaan: {$stok} unit):\n\n{$listStr}\n\nSemua produk terhubung langsung ke inventaris toko! 📋";
+                    }
+                    return "Halo Kak **{$displayName}**! 💕 Toko kami menyediakan **{$tot} pilihan aksesoris cantik** ready stok (Total {$stok} unit):\n\n{$listStr}\n\nSemua produk 100% real pict dan siap dikirim ya! Yuk klik menu **Katalog** untuk pesan! ✨";
                 }
-                return "Toko **Nnaco.SA** aktif melayani ratusan pesanan pelanggan setiap bulannya dengan ribuan stok aksesoris ready kirim. Ada produk yang ingin kamu cari hari ini? 🌸";
+                return $prefix . "Saat ini seluruh produk sedang dalam proses pembaruan katalog.";
+
+            // =================================================================
+            // EKSPEDISI & METODE PEMBAYARAN
+            // =================================================================
+            case 'shipping_inquiry':
+                return $prefix . "🚚 Toko **Nnaco.SA** bekerja sama dengan 3 jasa ekspedisi terpercaya:\n\n"
+                     . "• **SiCepat**: Ongkir flat Rp 12.000 (Estimasi 1-2 hari kerja)\n"
+                     . "• **J&T Express**: Ongkir flat Rp 14.000 (Estimasi 1-3 hari kerja)\n"
+                     . "• **JNE Reguler**: Ongkir flat Rp 15.000 (Estimasi 2-3 hari kerja)\n\n"
+                     . "Setiap pesanan yang dikirim dilengkapi dengan nomor resi resmi yang dapat dilacak langsung di menu **Lacak Pesanan**! 📦";
+
+            case 'payment_inquiry':
+                return $prefix . "💳 Toko **Nnaco.SA** menyediakan metode pembayaran yang praktis dan otomatis:\n\n"
+                     . "• **QRIS (Otomatis)**: Bisa scan pakai GoPay, OVO, Dana, ShopeePay, BCA Mobile, Livin' Mandiri, dll.\n"
+                     . "• **Transfer Bank**: Tersedia untuk Bank BCA, Mandiri, dan BNI.\n"
+                     . "• **Verifikasi Otomatis**: Transaksi langsung terverifikasi tanpa perlu konfirmasi manual yang lama! ✨";
+
+            // =================================================================
+            // PRODUK & STOK TOKO
+            // =================================================================
+            case 'product_bestseller':
+                $items = [];
+                foreach ($data as $p) {
+                    $price = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
+                    $items[] = "• **{$p['name']}** (Terjual: {$p['sales_count']} pcs) - Rp " . number_format($price, 0, ',', '.');
+                }
+                $list = implode("\n", $items);
+                return $prefix . "Ini dia koleksi aksesoris **paling laris (Best Seller)** di Nnaco.SA:\n\n{$list}\n\nSemua produk di atas ready stok dan siap dikirim ya! 💕";
+
+            case 'product_low_stock':
+                if (empty($data)) {
+                    return $prefix . "Kabar baik! Saat ini semua stok aksesoris di toko kami dalam kondisi aman dan mencukupi. 🌸";
+                }
+                $items = [];
+                foreach ($data as $p) {
+                    $items[] = "• **{$p['name']}** - Sisa **{$p['stock']} pcs**";
+                }
+                $list = implode("\n", $items);
+                if ($isAdmin) {
+                    return "Halo Admin **{$displayName}**! ⚠️ Berikut produk yang **stoknya menipis (&le; 5 unit)** dan perlu segera direstock:\n\n{$list}\n\nSilakan buka menu **Manajemen Stok** untuk update barang! 📦";
+                }
+                return "Halo Kak! Berikut daftar produk aksesoris yang **stoknya menipis (kritis)**:\n\n{$list}\n\nYuk checkout sekarang sebelum kehabisan! 🛍️✨";
+
+            case 'product_cheapest':
+                $items = [];
+                foreach ($data as $p) {
+                    $price = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
+                    $items[] = "• **{$p['name']}** - **Rp " . number_format($price, 0, ',', '.') . "**";
+                }
+                $list = implode("\n", $items);
+                return $prefix . "Ini dia rekomendasi aksesoris **termurah dan ramah di kantong** di Nnaco.SA:\n\n{$list}\n\nCantik, hemat, dan berkualitas! 💕";
+
+            case 'product_expensive':
+                $items = [];
+                foreach ($data as $p) {
+                    $price = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
+                    $items[] = "• **{$p['name']}** - **Rp " . number_format($price, 0, ',', '.') . "**";
+                }
+                $list = implode("\n", $items);
+                return $prefix . "Ini dia koleksi aksesoris **paling mewah & premium** di Nnaco.SA:\n\n{$list}\n\nDesain eksklusif dan material pilihan! ✨";
+
+            case 'categories_list':
+                $items = [];
+                foreach ($data as $c) {
+                    $items[] = "• **{$c['name']}** ({$c['product_count']} model)";
+                }
+                $list = implode("\n", $items);
+                return $prefix . "Di toko **Nnaco.SA** tersedia berbagai kategori aksesoris cantik:\n\n{$list}\n\nSilakan pilih kategori favoritmu di menu **Katalog** ya! 🌸";
+
+            case 'promo_query':
+                $coupons = $data['coupons'] ?? [];
+                if (!empty($coupons)) {
+                    $items = [];
+                    foreach ($coupons as $c) {
+                        $pot = ($c['discount_type'] === 'percentage') ? "Diskon {$c['discount_value']}%" : "Potongan Rp " . number_format($c['discount_value'], 0, ',', '.');
+                        $items[] = "• Kode Kupon: **{$c['code']}** ({$pot}, Min. Belanja Rp " . number_format($c['minimum_purchase'], 0, ',', '.') . ")";
+                    }
+                    $list = implode("\n", $items);
+                    return $prefix . "Hari ini ada voucher dan promo spesial di toko kami:\n\n{$list}\n\nGunakan kodenya saat checkout untuk dapat potongan harga langsung ya! 🎁✨";
+                }
+                return $prefix . "Saat ini banyak produk yang sedang memiliki potongan harga langsung di etalase kami lho! Silakan jelajahi etalase untuk menikmati promo diskonnya ya! 💕";
+
+            case 'reviews_query':
+                if (empty($data)) {
+                    return $prefix . "Toko **Nnaco.SA** selalu menjaga kualitas produk dan kepuasan pelanggan dengan rating rata-rata bintang 5 dan pengemasan rapi anti rusak! 💕";
+                }
+                $items = [];
+                foreach ($data as $rv) {
+                    $items[] = "• **{$rv['product_name']}** (Bintang {$rv['rating']}/5): \"{$rv['comment']}\"";
+                }
+                $list = implode("\n", $items);
+                return $prefix . "Ini beberapa ulasan kepuasan pelanggan terbaru di **Nnaco.SA**:\n\n{$list}\n\nKualitas terjamin dan 100% sesuai foto! 🌸";
 
             case 'order_inquiry':
                 if (!$isLoggedIn) {
@@ -1438,72 +1835,10 @@ class CustomerAIChatController
                         $orderList[] = "• **{$uo['order_number']}** (Rp " . number_format($uo['total_amount'], 0, ',', '.') . ")";
                     }
                     $listStr = implode("\n", $orderList);
-
                     return "Halo Kak **{$displayName}**! Saat ini kamu memiliki **{$unpaidCount} pesanan yang belum dibayar** dengan total tagihan **{$totalFormatted}**:\n\n{$listStr}\n\nSilakan selesaikan pembayaran melalui menu **Riwayat Pesanan** ya! 💕";
                 }
 
                 return "Halo Kak **{$displayName}**! Kamu saat ini **tidak memiliki pesanan yang belum dibayar**. Semua transaksi kamu sebelumnya telah lunas atau selesai. Terima kasih banyak telah berbelanja di Nnaco.SA! 🌸";
-
-            case 'product_bestseller':
-                $items = [];
-                foreach ($data as $p) {
-                    $price = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
-                    $items[] = "• **{$p['name']}** (Terjual: {$p['sales_count']} pcs) - Rp " . number_format($price, 0, ',', '.');
-                }
-                $list = implode("\n", $items);
-                return "Halo Kak **{$displayName}**! Ini dia koleksi aksesoris **paling laris (Best Seller)** di Nnaco.SA:\n\n{$list}\n\nSemua produk di atas ready stok dan siap dikirim ya! 💕";
-
-            case 'product_low_stock':
-                if (empty($data)) {
-                    return "Kabar baik Kak **{$displayName}**! Saat ini semua stok aksesoris di toko kami dalam kondisi aman dan mencukupi. Silakan pilih aksesoris favoritmu ya! 🌸";
-                }
-                $items = [];
-                foreach ($data as $p) {
-                    $items[] = "• **{$p['name']}** - Sisa **{$p['stock']} pcs**";
-                }
-                $list = implode("\n", $items);
-                return "Halo Kak! Berikut daftar produk aksesoris yang **stoknya menipis (kritis)**:\n\n{$list}\n\nYuk checkout sekarang sebelum kehabisan! 🛍️✨";
-
-            case 'product_cheapest':
-                $items = [];
-                foreach ($data as $p) {
-                    $price = (!empty($p['discount_price']) && $p['discount_price'] > 0) ? $p['discount_price'] : $p['price'];
-                    $items[] = "• **{$p['name']}** - **Rp " . number_format($price, 0, ',', '.') . "**";
-                }
-                $list = implode("\n", $items);
-                return "Halo Kak! Ini dia rekomendasi aksesoris **termurah dan ramah di kantong** di Nnaco.SA:\n\n{$list}\n\nCantik, hemat, dan berkualitas! Mau pesan yang mana? 💕";
-
-            case 'categories_list':
-                $items = [];
-                foreach ($data as $c) {
-                    $items[] = "• **{$c['name']}** ({$c['product_count']} model)";
-                }
-                $list = implode("\n", $items);
-                return "Halo Kak **{$displayName}**! Di toko **Nnaco.SA** tersedia berbagai kategori aksesoris cantik:\n\n{$list}\n\nKakak bisa klik kategori di atas atau gunakan fitur pencarian website ya! 🌸";
-
-            case 'promo_query':
-                $coupons = $data['coupons'] ?? [];
-                if (!empty($coupons)) {
-                    $items = [];
-                    foreach ($coupons as $c) {
-                        $pot = ($c['discount_type'] === 'percentage') ? "Diskon {$c['discount_value']}%" : "Potongan Rp " . number_format($c['discount_value'], 0, ',', '.');
-                        $items[] = "• Kode Kupon: **{$c['code']}** ({$pot}, Min. Belanja Rp " . number_format($c['minimum_purchase'], 0, ',', '.') . ")";
-                    }
-                    $list = implode("\n", $items);
-                    return "Kabar gembira Kak **{$displayName}**! Hari ini ada voucher dan promo spesial untuk kamu:\n\n{$list}\n\nGunakan kodenya saat checkout untuk dapat potongan harga langsung ya! 🎁✨";
-                }
-                return "Saat ini banyak produk yang sedang memiliki potongan harga langsung di etalase kami lho Kak! Silakan jelajahi etalase untuk menikmati promo diskonnya ya! 💕";
-
-            case 'reviews_query':
-                if (empty($data)) {
-                    return "Toko **Nnaco.SA** selalu menjaga kualitas produk dan kepuasan pelanggan dengan rating rata-rata bintang 5 dan pengemasan rapi anti rusak! 💕";
-                }
-                $items = [];
-                foreach ($data as $rv) {
-                    $items[] = "• **{$rv['product_name']}** (Bintang {$rv['rating']}/5): \"{$rv['comment']}\"";
-                }
-                $list = implode("\n", $items);
-                return "Ini beberapa ulasan kepuasan pelanggan terbaru di **Nnaco.SA**:\n\n{$list}\n\nKualitas terjamin dan 100% sesuai foto ya Kak! 🌸";
 
             case 'identity_inquiry':
                 if ($isLoggedIn) {
@@ -1520,7 +1855,7 @@ class CustomerAIChatController
                 $cats = !empty($data['categories']) 
                     ? implode(', ', $data['categories']) 
                     : 'Jedai, Jepit Rambut, Kalung, Cincin, Gelang, dan Anting';
-                return "Halo Kak **{$displayName}**! 💕 Saat ini toko **Nnaco.SA** memiliki **{$tot} produk aksesoris aktif** yang siap dibeli dengan total persediaan **{$stok} unit stok**. Kategori kami meliputi {$cats}. Silakan klik menu **Katalog** untuk melihat koleksi lengkap atau tanyakan model yang Kakak sukai ya! 🌸";
+                return $prefix . "Saat ini toko **Nnaco.SA** memiliki **{$tot} produk aksesoris aktif** yang siap dibeli dengan total persediaan **{$stok} unit stok**. Kategori kami meliputi {$cats}. Silakan klik menu **Katalog** untuk melihat koleksi lengkap ya! 🌸";
 
             case 'product_inquiry':
                 $found = $data['found'] ?? (!empty($data['products']));
@@ -1533,10 +1868,9 @@ class CustomerAIChatController
                         $items[] = "• **{$p['name']}** - Rp " . number_format($price, 0, ',', '.') . " ({$stockText})";
                     }
                     $list = implode("\n", $items);
-                    return "Halo Kak **{$displayName}**! ✨ Berikut koleksi aksesoris yang cocok dan tersedia di **Nnaco.SA**:\n\n{$list}\n\nAda produk yang ingin kamu tanyakan lebih lanjut? 💕";
+                    return $prefix . "Berikut koleksi aksesoris yang cocok dan tersedia di **Nnaco.SA**:\n\n{$list}\n\nAda produk yang ingin kamu tanyakan lebih lanjut? 💕";
                 }
 
-                // JIKA TIDAK DITEMUKAN (RAG Fallback Luwes & Menawarkan Alternatif)
                 $term = !empty($data['search_term']) ? " terkait **\"{$data['search_term']}\"**" : "";
                 $altItems = [];
                 foreach (($data['recommendations'] ?? []) as $rec) {
@@ -1547,91 +1881,93 @@ class CustomerAIChatController
                     ? "\n\nSebagai gantinya, Kakak mungkin tertarik dengan beberapa koleksi favorit kami ini:\n" . implode("\n", $altItems)
                     : "";
 
-                return "Halo Kak **{$displayName}**! 💕 Mohon maaf ya, produk{$term} saat ini belum tersedia di katalog toko kami. Namun jangan khawatir, Nnaco.SA punya beragam koleksi cantik lainnya seperti Jedai Korea, Kalung Rose Gold, Cincin Daisy, dan Gelang Zirconia yang siap melengkapi gayamu!{$altStr}\n\nYuk intip menu **Katalog** atau tanyakan rekomendasi aksesoris lainnya! 🌸";
+                return $prefix . "Mohon maaf ya, produk{$term} saat ini belum tersedia di katalog toko kami. Namun jangan khawatir, Nnaco.SA punya beragam koleksi cantik lainnya seperti Jedai Korea, Kalung Rose Gold, Cincin Daisy, dan Gelang Zirconia yang siap melengkapi gayamu!{$altStr}\n\nYuk intip menu **Katalog** atau tanyakan rekomendasi aksesoris lainnya! 🌸";
 
             case 'general':
             default:
+                if ($isAdmin) {
+                    return "Halo Admin **{$displayName}**! 📊 Asisten toko NNasa AI siap membantu mengecek performa penjualan, pesanan masuk, stok menipis, atau riwayat transaksi pelanggan. Apa yang ingin kamu pantau sekarang? 💼";
+                }
                 return "Halo Kak **{$displayName}**! Selamat datang di **Nnaco.SA** 💕 Aku asisten virtual toko yang bisa membantu mengecek pesanan, info stok aksesoris, produk terlaris, promo kupon, hingga panduan belanja. Ada yang bisa aku bantu hari ini? 🌸";
         }
     }
-
-    /**
-     * Pemanggilan cURL ke Google Gemini API
-     */
     private function callGeminiAPI(string $systemInstruction, string $databaseContext, string $userMessage): array
     {
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$this->aiModel}:generateContent?key=" . urlencode($this->aiApiKey);
+        $primary = !empty($this->aiModel) ? $this->aiModel : 'gemini-3.5-flash-lite';
+        $candidateModels = [$primary, 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+        $candidateModels = array_values(array_unique(array_filter($candidateModels)));
 
-        $userPromptWithContext = (!empty($databaseContext) ? "=== DATA KONTEKS DATABASE LENGKAP (FAKTUAL) ===\n{$databaseContext}\n==============================================\n\n" : "")
+        $userPromptWithContext = (!empty($databaseContext) ? "=== DATA RESMI DATABASE TOKO NNACO.SA ===\n{$databaseContext}\n==============================================\n\n" : "")
                                . "Pertanyaan Pengguna: " . $userMessage;
 
-        $payload = [
-            'system_instruction' => [
-                'parts' => [
-                    ['text' => $systemInstruction]
-                ]
-            ],
-            'contents' => [
-                [
-                    'role'  => 'user',
+        $lastError = 'Unknown error';
+
+        foreach ($candidateModels as $modelName) {
+            if (in_array($modelName, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro'])) {
+                continue; // Model lama yang sudah dinonaktifkan oleh Google
+            }
+
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$modelName}:generateContent?key=" . urlencode($this->aiApiKey);
+
+            $payload = [
+                'system_instruction' => [
                     'parts' => [
-                        ['text' => $userPromptWithContext]
+                        ['text' => $systemInstruction]
                     ]
+                ],
+                'contents' => [
+                    [
+                        'role'  => 'user',
+                        'parts' => [
+                            ['text' => $userPromptWithContext]
+                        ]
+                    ]
+                ],
+                'generationConfig' => [
+                    'temperature'     => 0.25,
+                    'maxOutputTokens' => 450
                 ]
-            ],
-            'generationConfig' => [
-                'temperature'     => 0.3,
-                'maxOutputTokens' => 350
-            ]
-        ];
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER     => [
-                'Content-Type: application/json'
-            ],
-            CURLOPT_POSTFIELDS     => json_encode($payload),
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT        => 30,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => 0
-        ]);
-
-        $response   = curl_exec($ch);
-        $curlErrNo  = curl_errno($ch);
-        $curlErrMsg = curl_error($ch);
-        $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($curlErrNo !== 0 || $response === false) {
-            return [
-                'status'  => 'error',
-                'message' => "cURL Error ({$curlErrNo}): {$curlErrMsg}"
             ];
-        }
 
-        $result = json_decode($response, true);
-        if ($httpCode !== 200) {
-            $apiMsg = $result['error']['message'] ?? $response;
-            return [
-                'status'  => 'error',
-                'message' => "Google Gemini API Error (HTTP {$httpCode}): {$apiMsg}"
-            ];
-        }
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER     => [
+                    'Content-Type: application/json'
+                ],
+                CURLOPT_POSTFIELDS     => json_encode($payload),
+                CURLOPT_CONNECTTIMEOUT => 5,
+                CURLOPT_TIMEOUT        => 12,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0
+            ]);
 
-        $replyText = $result['candidates'][0]['content']['parts'][0]['text'] ?? null;
-        if (empty($replyText)) {
-            return [
-                'status'  => 'error',
-                'message' => 'Google Gemini API response empty.'
-            ];
+            $response   = curl_exec($ch);
+            $curlErrNo  = curl_errno($ch);
+            $curlErrMsg = curl_error($ch);
+            $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($curlErrNo !== 0 || $response === false) {
+                $lastError = "cURL Error ({$curlErrNo}): {$curlErrMsg}";
+                continue;
+            }
+
+            $result = json_decode($response, true);
+            if ($httpCode === 200 && !empty($result['candidates'][0]['content']['parts'][0]['text'])) {
+                return [
+                    'status' => 'success',
+                    'reply'  => trim($result['candidates'][0]['content']['parts'][0]['text'])
+                ];
+            }
+
+            $lastError = "Google Gemini API Error (HTTP {$httpCode}): " . ($result['error']['message'] ?? $response);
         }
 
         return [
-            'status' => 'success',
-            'reply'  => trim($replyText)
+            'status'  => 'error',
+            'message' => $lastError
         ];
     }
 }

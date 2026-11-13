@@ -85,7 +85,10 @@ try {
         $rawApiKey = GEMINI_API_KEY;
     }
 
-    $model = get_setting('ai_model', 'gemini-1.5-flash');
+    $model = get_setting('ai_model', 'gemini-3.5-flash-lite');
+    if (in_array($model, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro', ''])) {
+        $model = 'gemini-3.5-flash-lite';
+    }
 
     // 2. Inisialisasi Controller
     $chatController = new CustomerAIChatController($db, (string)$rawApiKey, $model);
