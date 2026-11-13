@@ -179,35 +179,6 @@ require_once __DIR__ . '/templates/header.php';
 
         </div>
 
-        <div class="p-3 bg-light rounded-3 mt-4 border">
-          <small class="text-muted d-block fw-bold text-center mb-2">Akun Demo Pengujian:</small>
-          <div class="d-flex flex-column gap-2">
-            <div class="d-flex justify-content-between align-items-center bg-white p-2 rounded-2 border small">
-              <div>
-                <span class="badge bg-success-subtle text-success border border-success me-1">WA</span>
-                <strong>Pelanggan:</strong> <code>081387654321</code>
-                <div class="text-muted" style="font-size:11px;">(anisa@gmail.com / customer123)</div>
-              </div>
-              <button type="button" class="btn btn-sm btn-outline-success rounded-pill py-0 px-2" style="font-size:11px;" onclick="fillDemoWa('081387654321', 'anisa@gmail.com', 'customer123')">
-                Gunakan
-              </button>
-            </div>
-            <div class="d-flex justify-content-between align-items-center bg-white p-2 rounded-2 border small">
-              <div>
-                <span class="badge bg-success-subtle text-success border border-success me-1">WA</span>
-                <strong>Admin:</strong> <code>081298765432</code>
-                <div class="text-muted" style="font-size:11px;">(admin@nnasaca.com / admin123)</div>
-              </div>
-              <button type="button" class="btn btn-sm btn-outline-success rounded-pill py-0 px-2" style="font-size:11px;" onclick="fillDemoWa('081298765432', 'admin@nnasaca.com', 'admin123')">
-                Gunakan
-              </button>
-            </div>
-          </div>
-          <small class="text-muted text-center d-block mt-2" style="font-size: 11px;">
-            <i class="bi bi-info-circle me-1"></i> Klik <strong>Gunakan</strong> untuk mengisi otomatis form login.
-          </small>
-        </div>
-
         <div class="text-center mt-4">
           <p class="small text-muted mb-0">
             Belum memiliki akun? <a href="<?= BASE_URL ?>register.php" class="text-primary-pink fw-bold text-decoration-none">Daftar Sekarang</a>
@@ -222,30 +193,6 @@ require_once __DIR__ . '/templates/header.php';
 <script>
 let waCurrentPhone = '';
 let waTimerInterval = null;
-
-function fillDemoWa(phone, email, password) {
-  // Check active tab
-  const activeTab = document.querySelector('#loginMethodTabs .nav-link.active');
-  const isWaTab = activeTab && activeTab.id === 'tab-wa-login-btn';
-
-  if (isWaTab) {
-    const phoneInput = document.getElementById('waLoginPhone');
-    if (phoneInput) {
-      phoneInput.value = phone;
-      phoneInput.focus();
-    }
-  } else {
-    // Fill email and password
-    const emailInput = document.querySelector('input[name="email"]');
-    const passInput = document.querySelector('input[name="password"]');
-    if (emailInput) emailInput.value = email;
-    if (passInput) passInput.value = password;
-  }
-
-  if (typeof window.showToast === 'function') {
-    window.showToast('Akun demo berhasil diisi (' + phone + ')', 'success');
-  }
-}
 
 function showWaAlert(type, message, extraHtml = '') {
   const container = document.getElementById('waLoginAlert');
