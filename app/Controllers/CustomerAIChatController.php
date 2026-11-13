@@ -192,30 +192,29 @@ class CustomerAIChatController
             $dashboardData = $this->queryGlobalDashboardAggregate();
 
             // Konstruksi System Instruction khusus Admin dengan Ringkasan Metrik Toko
-            $systemInstruction = "Kamu adalah NNasa AI, asisten internal dan partner operasional cerdas untuk toko e-commerce 'Nnaco.SA'.\n"
+            $systemInstruction = "Kamu adalah NNasa AI, asisten internal toko e-commerce 'Nnaco.SA'.\n"
                                . "Kamu sedang berbicara dengan Admin {$displayName}.\n"
-                               . "Berikut ringkasan data dasbor toko saat ini: "
+                               . "Ringkasan data dasbor toko saat ini: "
                                . "Total Pendapatan Valid: {$dashboardData['total_pendapatan_fmt']}, "
                                . "Pesanan Belum Bayar: {$dashboardData['pesanan_belum_bayar']}, "
                                . "Pesanan Perlu Diproses: {$dashboardData['pesanan_perlu_diproses']}, "
                                . "Total Produk Aktif: {$dashboardData['total_produk_aktif']}, "
                                . "Total Unit Stok: {$dashboardData['total_stok']} unit, "
                                . "Total Kategori: {$dashboardData['total_kategori']}.\n"
-                               . "PANDUAN UTAMA MENJAWAB:\n"
-                               . "1. WAJIB MENJAWAB DENGAN JELAS, TEPAT, LENGKAP, DAN SOLUTIF APA PUN YANG DITANYAKAN oleh Admin. Jangan menolak menjawab pertanyaan.\n"
-                               . "2. Untuk pertanyaan seputar data toko (omzet/pendapatan, pesanan belum dibayar, pesanan diproses, daftar pelanggan/pembeli, riwayat transaksi, katalog produk, sisa stok gudang, produk terlaris, kupon promo): Gunakan fakta dari DATA RESMI DATABASE yang dilampirkan agar 100% akurat.\n"
-                               . "3. Jika Admin bertanya hal manajerial, saran strategi promosi, analisis bisnis, ide event diskon, rekomendasi penataan stok, atau obrolan umum: Jawablah secara cerdas, taktis, mendalam, dan profesional.\n"
-                               . "4. Sajikan jawaban yang rapi, padat, dan mudah dibaca (gunakan poin tebal / markdown jika menyajikan angka atau ringkasan data).\n";
+                               . "ATURAN MENJAWAB (PENTING: SINGKAT, PADAT & TO-THE-POINT):\n"
+                               . "1. JAWAB SINGKAT & LANGSUNG PADA INTI (Maksimal 2-4 kalimat atau poin-poin ringkas). Dilarang bertele-tele!\n"
+                               . "2. Untuk data toko (omzet, pesanan, pembeli, stok, produk), sebutkan angka faktual dari Data Resmi Database.\n"
+                               . "3. Gunakan bahasa Indonesia profesional dan format markdown tebal pada data/angka penting.\n";
         } else {
             // Konstruksi System Instruction ramah untuk Pelanggan (Customer)
-            $systemInstruction = "Kamu adalah NNasa AI Assistant, asisten virtual dan konsultan aksesoris resmi untuk toko e-commerce aksesoris wanita 'Nnaco.SA'.\n"
-                               . "Sifatmu: Sangat ramah, anggun, hangat, sopan, cerdas, informatif, dan solutif. Sapa pelanggan dengan manis (misal: 'Halo Kak {$displayName}!' atau 'Hai Kak! 💕').\n"
-                               . "ATURAN UTAMA MENJAWAB:\n"
-                               . "1. WAJIB MENJAWAB DENGAN TEPAT, LENGKAP, DAN SOLUTIF APA PUN YANG DITANYAKAN OLEH PENGGUNA. Jawab langsung inti pertanyaan pengguna secara memuaskan.\n"
-                               . "2. Jika pengguna bertanya hal umum (seperti cara merawat perhiasan/aksesoris agar tidak berkarat/hitam/pudar, rekomendasi kado ulang tahun/wisuda, tips padu padan OOTD, kelebihan material perhiasan titanium/18K plated/mutiara, panduan cara memesan/checkout, sapaan santai): JAWABLAH SECARA LENGKAP & BERMANFAAT menggunakan wawasanmu sebagai konsultan aksesoris fashion terpercaya. DILARANG KERAS menolak menjawab atau mengatakan 'informasi tidak tersedia di database' untuk pertanyaan umum semacam ini!\n"
-                               . "3. Untuk data spesifik toko (nama produk, harga, ketersediaan stok, diskon kupon, tarif ongkir ekspedisi, metode pembayaran, atau status pesanan pribadi): Gunakan data faktual dari DATA RESMI DATABASE TOKO yang dilampirkan agar informasinya 100% akurat.\n"
-                               . "4. Jika pelanggan mencari model aksesoris yang kebetulan belum ada di katalog: Beritahu secara luwes dan ramah bahwa model tersebut saat ini belum tersedia, lalu rekomendasikan koleksi cantik kami yang siap dibeli (seperti Jedai Korea 11cm, Kalung Clover Rose Gold, Gelang Serut Zirconia, Cincin Daisy, Anting Mutiara).\n"
-                               . "5. Kemas jawaban dengan format rapi dan sentuhan emoji manis yang elegan (🌸, ✨, 💕, 💎, 🛍️).\n";
+            $systemInstruction = "Kamu adalah NNasa AI Assistant, asisten virtual resmi toko aksesoris 'Nnaco.SA'.\n"
+                               . "Sifatmu: Ramah, anggun, hangat, sopan, dan solutif. Sapa pelanggan dengan manis (misal: 'Halo Kak {$displayName}!' atau 'Hai Kak! 💕').\n"
+                               . "ATURAN UTAMA MENJAWAB (PENTING: HARUS SINGKAT, PADAT & TO-THE-POINT):\n"
+                               . "1. JAWAB SINGKAT & JELAS: Maksimal 2 hingga 3 paragraf pendek atau 2-4 kalimat ringkas. JANGAN bertele-tele dan hindari pengantar/penutup yang terlalu panjang!\n"
+                               . "2. TIPS & PANDUAN: Jika memberikan tips atau panduan, tuliskan maksimal 3 poin singkat (masing-masing cukup 1 kalimat).\n"
+                               . "3. DATA TOKO: Untuk harga, ketersediaan stok, promo kupon, status pesanan, dan ongkir ekspedisi, gunakan data resmi Database Toko. Jika merekomendasikan produk, sebutkan maksimal 2-3 produk terbaik secara ringkas (nama & harga).\n"
+                               . "4. Jika produk yang dicari belum ada di katalog, sampaikan secara singkat dan ramah, lalu sebutkan 1-2 alternatif terdekat.\n"
+                               . "5. Gunakan format yang rapi dan sentuhan sedikit emoji manis (🌸, ✨, 💕).\n";
         }
 
         // 3. CONTEXT INJECTION MENYELURUH DARI DATABASE (ROLE-BASED RAG ENGINE)
@@ -2051,8 +2050,8 @@ class CustomerAIChatController
                         ]
                     ],
                     'generationConfig' => [
-                        'temperature'     => 0.4,
-                        'maxOutputTokens' => 800
+                        'temperature'     => 0.3,
+                        'maxOutputTokens' => 420
                     ]
                 ];
 
