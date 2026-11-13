@@ -29,6 +29,7 @@ class CustomerAIChatController
 {
     private PDO $db;
     private string $aiApiKey;
+    private array $aiApiKeysPool = [];
     private string $aiModel;
 
     // Nama tabel database agar mudah dikustomisasi
@@ -40,10 +41,30 @@ class CustomerAIChatController
     protected string $tableCoupons    = 'coupons';
     protected string $tableReviews    = 'reviews';
 
-    public function __construct(PDO $db, string $aiApiKey, string $aiModel = 'gemini-3.5-flash-lite')
+    public function __construct(PDO $db, $aiApiKey, string $aiModel = 'gemini-3.5-flash-lite')
     {
         $this->db = $db;
-        $this->aiApiKey = self::decryptApiKey($aiApiKey) ?? trim($aiApiKey);
+        $keys = is_array($aiApiKey) ? $aiApiKey : [$aiApiKey];
+        if (function_exists('get_setting')) {
+            $keys[] = get_setting('ai_api_key', '');
+            $keys[] = get_setting('ai_api_key_main', '');
+            $keys[] = get_setting('ai_api_key_backup_1', '');
+            $keys[] = get_setting('ai_api_key_backup_2', '');
+        }
+        if (defined('GEMINI_API_KEY')) {
+            $keys[] = GEMINI_API_KEY;
+        }
+
+        $validKeys = [];
+        foreach ($keys as $k) {
+            $dec = self::decryptApiKey($k) ?? trim((string)$k);
+            if (!empty($dec) && strlen($dec) >= 20) {
+                $validKeys[] = $dec;
+            }
+        }
+        $this->aiApiKeysPool = array_values(array_unique($validKeys));
+        $this->aiApiKey = $this->aiApiKeysPool[0] ?? '';
+
         $cleanModel = !empty($aiModel) ? trim($aiModel) : 'gemini-3.5-flash-lite';
         if (in_array($cleanModel, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro', ''])) {
             $cleanModel = 'gemini-3.5-flash-lite';
@@ -171,25 +192,30 @@ class CustomerAIChatController
             $dashboardData = $this->queryGlobalDashboardAggregate();
 
             // Konstruksi System Instruction khusus Admin dengan Ringkasan Metrik Toko
-            $systemInstruction = "Kamu adalah NNasa AI, asisten internal toko Nnaco.SA. "
-                               . "Kamu sedang berbicara dengan Admin {$displayName}. "
-                               . "Berikut adalah ringkasan data dasbor toko saat ini: "
+            $systemInstruction = "Kamu adalah NNasa AI, asisten internal dan partner operasional cerdas untuk toko e-commerce 'Nnaco.SA'.\n"
+                               . "Kamu sedang berbicara dengan Admin {$displayName}.\n"
+                               . "Berikut ringkasan data dasbor toko saat ini: "
                                . "Total Pendapatan Valid: {$dashboardData['total_pendapatan_fmt']}, "
                                . "Pesanan Belum Bayar: {$dashboardData['pesanan_belum_bayar']}, "
                                . "Pesanan Perlu Diproses: {$dashboardData['pesanan_perlu_diproses']}, "
                                . "Total Produk Aktif: {$dashboardData['total_produk_aktif']}, "
                                . "Total Unit Stok: {$dashboardData['total_stok']} unit, "
-                               . "Total Kategori: {$dashboardData['total_kategori']}. "
-                               . "Jawab pertanyaan admin secara ringkas, profesional, dan akurat berdasarkan data dasbor ini. "
-                               . "PENTING: Jangan mengecek pesanan pribadi admin jika admin bertanya tentang 'pesanan belum dibayar' atau metrik toko, melainkan jawab berdasarkan data dasbor toko di atas!";
+                               . "Total Kategori: {$dashboardData['total_kategori']}.\n"
+                               . "PANDUAN UTAMA MENJAWAB:\n"
+                               . "1. WAJIB MENJAWAB DENGAN JELAS, TEPAT, LENGKAP, DAN SOLUTIF APA PUN YANG DITANYAKAN oleh Admin. Jangan menolak menjawab pertanyaan.\n"
+                               . "2. Untuk pertanyaan seputar data toko (omzet/pendapatan, pesanan belum dibayar, pesanan diproses, daftar pelanggan/pembeli, riwayat transaksi, katalog produk, sisa stok gudang, produk terlaris, kupon promo): Gunakan fakta dari DATA RESMI DATABASE yang dilampirkan agar 100% akurat.\n"
+                               . "3. Jika Admin bertanya hal manajerial, saran strategi promosi, analisis bisnis, ide event diskon, rekomendasi penataan stok, atau obrolan umum: Jawablah secara cerdas, taktis, mendalam, dan profesional.\n"
+                               . "4. Sajikan jawaban yang rapi, padat, dan mudah dibaca (gunakan poin tebal / markdown jika menyajikan angka atau ringkasan data).\n";
         } else {
             // Konstruksi System Instruction ramah untuk Pelanggan (Customer)
-            $systemInstruction = "Kamu adalah NNasa AI Assistant, asisten virtual resmi untuk toko e-commerce 'Nnaco.SA'. "
-                               . "Sifatmu ramah, anggun, hangat, sopan, profesional, dan solutif. "
-                               . "Kamu sedang berbicara dengan pelanggan bernama {$displayName}. Sapa dia dengan ramah. "
-                               . "Jawab pertanyaan pengguna secara ringkas (maksimal 2-3 kalimat), anggun, dan faktual HANYA berdasarkan Data Konteks Database yang diberikan. "
-                               . "Jika barang yang dicari pelanggan belum tersedia, sampaikan secara luwes dan tawarkan alternatif koleksi aksesoris kami tanpa bersikap kaku. "
-                               . "DILARANG keras berhalusinasi atau mengarang nomor transaksi, nama produk, nominal rupiah, atau sisa stok yang tidak tercantum dalam Data Konteks!";
+            $systemInstruction = "Kamu adalah NNasa AI Assistant, asisten virtual dan konsultan aksesoris resmi untuk toko e-commerce aksesoris wanita 'Nnaco.SA'.\n"
+                               . "Sifatmu: Sangat ramah, anggun, hangat, sopan, cerdas, informatif, dan solutif. Sapa pelanggan dengan manis (misal: 'Halo Kak {$displayName}!' atau 'Hai Kak! 💕').\n"
+                               . "ATURAN UTAMA MENJAWAB:\n"
+                               . "1. WAJIB MENJAWAB DENGAN TEPAT, LENGKAP, DAN SOLUTIF APA PUN YANG DITANYAKAN OLEH PENGGUNA. Jawab langsung inti pertanyaan pengguna secara memuaskan.\n"
+                               . "2. Jika pengguna bertanya hal umum (seperti cara merawat perhiasan/aksesoris agar tidak berkarat/hitam/pudar, rekomendasi kado ulang tahun/wisuda, tips padu padan OOTD, kelebihan material perhiasan titanium/18K plated/mutiara, panduan cara memesan/checkout, sapaan santai): JAWABLAH SECARA LENGKAP & BERMANFAAT menggunakan wawasanmu sebagai konsultan aksesoris fashion terpercaya. DILARANG KERAS menolak menjawab atau mengatakan 'informasi tidak tersedia di database' untuk pertanyaan umum semacam ini!\n"
+                               . "3. Untuk data spesifik toko (nama produk, harga, ketersediaan stok, diskon kupon, tarif ongkir ekspedisi, metode pembayaran, atau status pesanan pribadi): Gunakan data faktual dari DATA RESMI DATABASE TOKO yang dilampirkan agar informasinya 100% akurat.\n"
+                               . "4. Jika pelanggan mencari model aksesoris yang kebetulan belum ada di katalog: Beritahu secara luwes dan ramah bahwa model tersebut saat ini belum tersedia, lalu rekomendasikan koleksi cantik kami yang siap dibeli (seperti Jedai Korea 11cm, Kalung Clover Rose Gold, Gelang Serut Zirconia, Cincin Daisy, Anting Mutiara).\n"
+                               . "5. Kemas jawaban dengan format rapi dan sentuhan emoji manis yang elegan (🌸, ✨, 💕, 💎, 🛍️).\n";
         }
 
         // 3. CONTEXT INJECTION MENYELURUH DARI DATABASE (ROLE-BASED RAG ENGINE)
@@ -582,6 +608,66 @@ class CustomerAIChatController
             str_contains($norm, 'qris')
         ) {
             return $this->queryPaymentMethodsContext();
+        }
+
+        // 3b. Kebijakan Pembayaran COD
+        if (str_contains($norm, 'cod') || str_contains($norm, 'bayar di tempat') || str_contains($norm, 'cash on delivery')) {
+            $context = "Kebijakan Pembayaran COD Toko Nnaco.SA:\n"
+                     . "- Saat ini Nnaco.SA belum menyediakan metode pembayaran Cash On Delivery (COD).\n"
+                     . "- Pembayaran yang tersedia: QRIS Otomatis (GoPay, OVO, Dana, ShopeePay) serta Transfer Bank Virtual Account (BCA, Mandiri, BNI).";
+            return ['intent' => 'cod_inquiry', 'context' => $context, 'data' => []];
+        }
+
+        // 3c. Panduan Cara Pesan / Belanja
+        if (str_contains($norm, 'cara pesan') || str_contains($norm, 'cara order') || str_contains($norm, 'cara beli') || str_contains($norm, 'cara checkout') || str_contains($norm, 'gimana cara belanja')) {
+            $context = "Panduan Belanja di Toko Nnaco.SA:\n"
+                     . "1. Buka menu Katalog dan pilih aksesoris favorit.\n"
+                     . "2. Klik 'Tambah ke Keranjang' atau 'Beli Sekarang'.\n"
+                     . "3. Masukkan alamat pengiriman dan pilih ekspedisi (SiCepat / J&T / JNE).\n"
+                     . "4. Masukkan kode kupon promo (misal: NNASANEW) jika ada.\n"
+                     . "5. Selesaikan pembayaran via QRIS / Transfer Bank.\n"
+                     . "6. Pesanan akan langsung diproses dan nomor resi pengiriman dapat dilacak di menu Lacak Pesanan!";
+            return ['intent' => 'how_to_order', 'context' => $context, 'data' => []];
+        }
+
+        // 3d. Tips Perawatan Aksesoris & Bahan Anti Karat
+        if (str_contains($norm, 'merawat') || str_contains($norm, 'karat') || str_contains($norm, 'pudar') || str_contains($norm, 'awet') || str_contains($norm, 'menghitam') || str_contains($norm, 'membersihkan')) {
+            $context = "Panduan & Tips Perawatan Aksesoris Nnaco.SA:\n"
+                     . "1. Hindari kontak langsung dengan bahan kimia keras (parfum, body lotion, alkohol, sanitizer).\n"
+                     . "2. Lepas perhiasan sebelum mandi, berenang di air klorin/laut, atau berolahraga.\n"
+                     . "3. Simpan di tempat yang kering dan wadah tertutup (kotak perhiasan atau pouch beludru).\n"
+                     . "4. Bersihkan secara berkala dengan mengusap lembut menggunakan kain microfiber kering.\n"
+                     . "5. Koleksi aksesoris kami menggunakan material berkualitas tinggi seperti Titanium Stainless Steel, Zirconia AAA, dan Lapis Emas 18K yang awet dan berkilau mewah.";
+            return ['intent' => 'care_tips', 'context' => $context, 'data' => []];
+        }
+
+        // 3e. Rekomendasi Hadiah / Kado
+        if (str_contains($norm, 'kado') || str_contains($norm, 'hadiah') || str_contains($norm, 'wisuda') || str_contains($norm, 'ulang tahun') || str_contains($norm, 'sahabat') || str_contains($norm, 'pacar')) {
+            $context = "Rekomendasi Kado & Hadiah Spesial di Nnaco.SA:\n"
+                     . "1. Romantic Rose Gold Luxury Gift Box Set (4-in-1) - Rp 149.000 (Box mewah berpita dengan 4 perhiasan rose gold).\n"
+                     . "2. Aura Rose Gold Clover Pendant Necklace - Rp 69.000 (Kalung liontin clover simbol keberuntungan).\n"
+                     . "3. Blooming Daisy Adjustable Ring 18K Plated - Rp 45.000 (Cincin motif bunga daisy lapis emas 18K yang ukurannya bisa diatur).\n"
+                     . "4. Dainty Freshwater Pearl Drop Earrings - Rp 65.000 (Anting mutiara air tawar asli yang anggun).";
+            return ['intent' => 'gift_recommendation', 'context' => $context, 'data' => []];
+        }
+
+        // 3f. Sapaan Santai & Profil AI
+        if (
+            str_contains($norm, 'halo') || 
+            str_contains($norm, 'hai') || 
+            str_contains($norm, 'selamat pagi') || 
+            str_contains($norm, 'selamat siang') || 
+            str_contains($norm, 'selamat sore') || 
+            str_contains($norm, 'selamat malam') ||
+            str_contains($norm, 'assalamualaikum') ||
+            str_contains($norm, 'kamu siapa') ||
+            str_contains($norm, 'siapa kamu') ||
+            str_contains($norm, 'bisa bantu apa')
+        ) {
+            $context = "Profil Asisten Toko Nnaco.SA:\n"
+                     . "- Nama: NNasa AI Assistant (Asisten virtual resmi toko aksesoris Nnaco.SA).\n"
+                     . "- Kemampuan: Membantu rekomendasi produk, cek stok, status pesanan, kupon diskon, tarif ekspedisi, tips perawatan, dan melayani pelanggan secara cerdas 24/7.";
+            return ['intent' => 'greeting', 'context' => $context, 'data' => []];
         }
 
         // 4. Kupon, Voucher & Promo Diskon
@@ -1883,6 +1969,44 @@ class CustomerAIChatController
 
                 return $prefix . "Mohon maaf ya, produk{$term} saat ini belum tersedia di katalog toko kami. Namun jangan khawatir, Nnaco.SA punya beragam koleksi cantik lainnya seperti Jedai Korea, Kalung Rose Gold, Cincin Daisy, dan Gelang Zirconia yang siap melengkapi gayamu!{$altStr}\n\nYuk intip menu **Katalog** atau tanyakan rekomendasi aksesoris lainnya! 🌸";
 
+            case 'care_tips':
+                return $prefix . "💎 Berikut tips praktis agar koleksi aksesoris kesayanganmu tetap berkilau dan tidak mudah pudar:\n\n"
+                     . "1. **Hindari Bahan Kimia**: Lepaskan aksesoris saat memakai parfum, lotion, atau semprotan rambut.\n"
+                     . "2. **Lepas Saat Mandi/Berenang**: Hindari air berklorin atau air laut agar kilau lapisan emas dan mutiara tetap awet.\n"
+                     . "3. **Simpan di Tempat Kering**: Simpan di dalam pouch atau kotak perhiasan tersendiri agar tidak tergores.\n"
+                     . "4. **Bersihkan dengan Lembut**: Usap perlahan menggunakan kain microfiber halus setelah dipakai.\n\n"
+                     . "Koleksi aksesoris Nnaco.SA menggunakan material titanium & 18K plated berkualitas tinggi yang awet dan aman dipakai sehari-hari! ✨";
+
+            case 'cod_inquiry':
+                return $prefix . "Mohon maaf ya, saat ini toko **Nnaco.SA** belum menyediakan opsi pembayaran COD (Bayar di Tempat). 🙏\n\n"
+                     . "Namun jangan khawatir! Kami menyediakan metode pembayaran digital yang sangat mudah, aman, dan instan:\n"
+                     . "• **QRIS Otomatis** (GoPay, OVO, Dana, ShopeePay, BCA, Mandiri)\n"
+                     . "• **Transfer Bank Virtual Account** (BCA, Mandiri, BNI)\n\n"
+                     . "Semua pembayaran terverifikasi otomatis dalam hitungan detik lho! Ada koleksi yang ingin kamu pinang hari ini? 💕";
+
+            case 'how_to_order':
+                return $prefix . "Belanja aksesoris cantik di **Nnaco.SA** gampang banget lho! Ikuti langkah praktis ini ya:\n\n"
+                     . "1. 🛍️ Jelajahi koleksi di menu **Katalog** lalu pilih produk impianmu.\n"
+                     . "2. 🛒 Klik **Beli Sekarang** atau masukkan ke keranjang belanja.\n"
+                     . "3. 📦 Isi alamat pengiriman dan pilih ekspedisi (SiCepat / J&T / JNE).\n"
+                     . "4. 🏷️ Masukkan kode kupon promo (misal: **NNASANEW** untuk diskon 15%) jika ada.\n"
+                     . "5. 💳 Selesaikan pembayaran via QRIS atau Transfer Bank.\n\n"
+                     . "Setelah pembayaran berhasil, pesanan langsung diproses dan nomor resi dapat dipantau di menu **Lacak Pesanan**! 🌸";
+
+            case 'gift_recommendation':
+                return $prefix . "Wah, pilihan yang manis banget! 🎁 Untuk kado istimewa sahabat atau orang tersayang, berikut rekomendasi terbaik dari Nnaco.SA:\n\n"
+                     . "1. **Romantic Rose Gold Luxury Gift Box Set (4-in-1)** (Rp 149.000) – *Best seller kado!* Sudah lengkap dengan box mewah berpita dan isi 4 aksesoris cantik.\n"
+                     . "2. **Aura Rose Gold Clover Pendant Necklace** (Rp 69.000) – Kalung liontin clover simbol cinta dan keberuntungan.\n"
+                     . "3. **Blooming Daisy Adjustable Ring 18K Plated** (Rp 45.000) – Cincin bunga manis yang ukurannya bisa diatur (adjustable).\n"
+                     . "4. **Dainty Freshwater Pearl Drop Earrings** (Rp 65.000) – Anting mutiara air tawar anggun untuk momen spesial.\n\n"
+                     . "Mau aku bantu pilihkan yang paling cocok dengan gaya sahabatmu? 💕";
+
+            case 'greeting':
+                if ($isAdmin) {
+                    return "Halo Admin **{$displayName}**! 📊 Asisten toko NNasa AI siap membantu memantau omzet penjualan, pesanan masuk, persediaan stok, atau riwayat pembeli. Apa yang ingin dicek hari ini? 💼";
+                }
+                return "Halo Kak **{$displayName}**! Selamat datang di **Nnaco.SA** 💕 Aku asisten virtual toko yang siap membantu rekomendasi aksesoris, info stok, cek pesanan, hingga tips belanja. Ada yang bisa aku bantu hari ini? 🌸";
+
             case 'general':
             default:
                 if ($isAdmin) {
@@ -1897,72 +2021,83 @@ class CustomerAIChatController
         $candidateModels = [$primary, 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
         $candidateModels = array_values(array_unique(array_filter($candidateModels)));
 
+        $candidateKeys = !empty($this->aiApiKeysPool) ? $this->aiApiKeysPool : (strlen($this->aiApiKey) >= 20 ? [$this->aiApiKey] : []);
+
         $userPromptWithContext = (!empty($databaseContext) ? "=== DATA RESMI DATABASE TOKO NNACO.SA ===\n{$databaseContext}\n==============================================\n\n" : "")
                                . "Pertanyaan Pengguna: " . $userMessage;
 
         $lastError = 'Unknown error';
 
-        foreach ($candidateModels as $modelName) {
-            if (in_array($modelName, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro'])) {
-                continue; // Model lama yang sudah dinonaktifkan oleh Google
-            }
+        foreach ($candidateKeys as $activeKey) {
+            foreach ($candidateModels as $modelName) {
+                if (in_array($modelName, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro'])) {
+                    continue; // Model lama yang sudah dinonaktifkan oleh Google
+                }
 
-            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$modelName}:generateContent?key=" . urlencode($this->aiApiKey);
+                $url = "https://generativelanguage.googleapis.com/v1beta/models/{$modelName}:generateContent?key=" . urlencode($activeKey);
 
-            $payload = [
-                'system_instruction' => [
-                    'parts' => [
-                        ['text' => $systemInstruction]
-                    ]
-                ],
-                'contents' => [
-                    [
-                        'role'  => 'user',
+                $payload = [
+                    'system_instruction' => [
                         'parts' => [
-                            ['text' => $userPromptWithContext]
+                            ['text' => $systemInstruction]
                         ]
+                    ],
+                    'contents' => [
+                        [
+                            'role'  => 'user',
+                            'parts' => [
+                                ['text' => $userPromptWithContext]
+                            ]
+                        ]
+                    ],
+                    'generationConfig' => [
+                        'temperature'     => 0.4,
+                        'maxOutputTokens' => 800
                     ]
-                ],
-                'generationConfig' => [
-                    'temperature'     => 0.25,
-                    'maxOutputTokens' => 450
-                ]
-            ];
-
-            $ch = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_POST           => true,
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_HTTPHEADER     => [
-                    'Content-Type: application/json'
-                ],
-                CURLOPT_POSTFIELDS     => json_encode($payload),
-                CURLOPT_CONNECTTIMEOUT => 5,
-                CURLOPT_TIMEOUT        => 12,
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => 0
-            ]);
-
-            $response   = curl_exec($ch);
-            $curlErrNo  = curl_errno($ch);
-            $curlErrMsg = curl_error($ch);
-            $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-
-            if ($curlErrNo !== 0 || $response === false) {
-                $lastError = "cURL Error ({$curlErrNo}): {$curlErrMsg}";
-                continue;
-            }
-
-            $result = json_decode($response, true);
-            if ($httpCode === 200 && !empty($result['candidates'][0]['content']['parts'][0]['text'])) {
-                return [
-                    'status' => 'success',
-                    'reply'  => trim($result['candidates'][0]['content']['parts'][0]['text'])
                 ];
-            }
 
-            $lastError = "Google Gemini API Error (HTTP {$httpCode}): " . ($result['error']['message'] ?? $response);
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [
+                    CURLOPT_POST           => true,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_HTTPHEADER     => [
+                        'Content-Type: application/json',
+                        'User-Agent: NnacoSA-Chatbot/2.0'
+                    ],
+                    CURLOPT_POSTFIELDS     => json_encode($payload),
+                    CURLOPT_CONNECTTIMEOUT => 5,
+                    CURLOPT_TIMEOUT        => 12,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => 0
+                ]);
+
+                $response   = curl_exec($ch);
+                $curlErrNo  = curl_errno($ch);
+                $curlErrMsg = curl_error($ch);
+                $httpCode   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+
+                if ($curlErrNo !== 0 || $response === false) {
+                    $lastError = "cURL Error ({$curlErrNo}): {$curlErrMsg}";
+                    continue;
+                }
+
+                $result = json_decode($response, true);
+                if ($httpCode === 200 && !empty($result['candidates'][0]['content']['parts'][0]['text'])) {
+                    return [
+                        'status' => 'success',
+                        'reply'  => trim($result['candidates'][0]['content']['parts'][0]['text']),
+                        'model'  => $modelName
+                    ];
+                }
+
+                if ($httpCode === 401 || $httpCode === 403) {
+                    // API Key tidak valid, coba key berikutnya di pool
+                    break;
+                }
+
+                $lastError = "Google Gemini API Error (HTTP {$httpCode}): " . ($result['error']['message'] ?? $response);
+            }
         }
 
         return [

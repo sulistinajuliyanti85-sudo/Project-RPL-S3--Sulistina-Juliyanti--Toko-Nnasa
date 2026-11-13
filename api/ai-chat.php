@@ -73,25 +73,23 @@ if (mb_strlen($message) > 500) {
 try {
     $db = getDB();
 
-    // 1. Ambil API Key dari Database Settings atau Konfigurasi
-    $rawApiKey = get_setting('ai_api_key_main', '');
-    if (empty($rawApiKey)) {
-        $rawApiKey = get_setting('ai_api_key', '');
-    }
-    if (empty($rawApiKey) && defined('CHATBOT_API_KEY')) {
-        $rawApiKey = CHATBOT_API_KEY;
-    }
-    if (empty($rawApiKey) && defined('GEMINI_API_KEY')) {
-        $rawApiKey = GEMINI_API_KEY;
-    }
+    // 1. Kumpulkan seluruh API Key yang tersedia dengan urutan prioritas valid
+    $candidateKeys = array_values(array_unique(array_filter([
+        get_setting('ai_api_key', ''),
+        defined('GEMINI_API_KEY') ? GEMINI_API_KEY : '',
+        get_setting('ai_api_key_main', ''),
+        get_setting('ai_api_key_backup_1', ''),
+        get_setting('ai_api_key_backup_2', ''),
+        defined('CHATBOT_API_KEY') ? CHATBOT_API_KEY : '',
+    ])));
 
     $model = get_setting('ai_model', 'gemini-3.5-flash-lite');
     if (in_array($model, ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-pro', ''])) {
         $model = 'gemini-3.5-flash-lite';
     }
 
-    // 2. Inisialisasi Controller
-    $chatController = new CustomerAIChatController($db, (string)$rawApiKey, $model);
+    // 2. Inisialisasi Controller dengan pool API Keys
+    $chatController = new CustomerAIChatController($db, $candidateKeys, $model);
 
     // 3. Eksekusi Chat dengan Session Injection & Database RAG
     $response = $chatController->handleChat($message, $_SESSION ?? []);
