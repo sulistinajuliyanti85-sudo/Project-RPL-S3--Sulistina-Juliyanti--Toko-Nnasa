@@ -5,8 +5,8 @@
 
 ### IDENTITAS MAHASISWA & PROYEK
 * **Nama Mahasiswa**: Sulistina Juliyanti
-* **NIM**: *[Isi NIM Anda]*
-* **Kelompok**: *[Isi Nomor Kelompok Anda]*
+* **NIM**: 41257161
+* **Kelompok**: Sumber City
 * **Program Studi**: Teknik Informatika / Sistem Informasi
 * **Mata Kuliah**: Rekayasa Perangkat Lunak (RPL)
 * **Dosen Pengampu**: *[Nama Dosen Pengampu / Pak Yudis]*

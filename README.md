@@ -10,8 +10,8 @@
 | Atribut | Keterangan |
 | :--- | :--- |
 | **Nama Mahasiswa** | **Sulistina Juliyanti** |
-| **NIM** | *[Silakan isi NIM Anda di sini]* |
-| **Kelompok** | *[Silakan isi Nomor/Nama Kelompok Anda di sini]* |
+| **NIM** | *41257161* |
+| **Kelompok** | *Sumber City* |
 | **Tema / Topik Kelompok** | Marketplace Toko Aksesoris Wanita Berbasis Kecerdasan Buatan (AI) & OTP Gateway |
 | **Nama Aplikasi** | **nnasa_ca (Nnaco.SA)** |
 | **Repositori GitHub** | [https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa](https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa) |
