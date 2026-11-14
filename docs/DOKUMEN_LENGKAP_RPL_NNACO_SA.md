@@ -7,9 +7,9 @@
 * **Nama Mahasiswa**: Sulistina Juliyanti
 * **NIM**: 41257161
 * **Kelompok**: Sumber City
-* **Program Studi**: Teknik Informatika / Sistem Informasi
+* **Program Studi**: Teknik Informatika 
 * **Mata Kuliah**: Rekayasa Perangkat Lunak (RPL)
-* **Dosen Pengampu**: *[Nama Dosen Pengampu / Pak Yudis]*
+* **Dosen Pengampu**: *Payudistira Arie Wijaya M.kom*
 * **Judul Proyek**: Pengembangan Sistem Informasi Marketplace Toko Aksesoris Wanita Berbasis Asisten Cerdas (AI Context Grounding) dan Otentikasi OTP WhatsApp (*nnasa_ca*)
 * **Tautan Repositori GitHub**: [https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa](https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa)
 
