@@ -25,9 +25,8 @@ Wajib diisi dengan tautan video demo yang telah diunggah ke YouTube / Google Dri
 
 | No | Kategori Video | Tautan (URL) | Status | Keterangan |
 | :---: | :--- | :--- | :---: | :--- |
-| 1 | **Video Progres 1** | *[Tempelkan link YouTube / Drive Video Progres 1]* | ⏳ Siap Diisi | Presentasi rancangan PRD, SRS, pemodelan ERD database, dan wireframe antarmuka UI/UX. |
-| 2 | **Video Progres 2** | *[Tempelkan link YouTube / Drive Video Progres 2]* | ⏳ Siap Diisi | Demonstrasi implementasi backend MVC, katalog produk, keranjang, checkout transaksi atomik, dan panel admin. |
-| 3 | **Video Final Demo** | *[Tempelkan link YouTube / Drive Video Final Demo]* | ⏳ Siap Diisi | Pengujian menyeluruh (*end-to-end*), demonstrasi AI Assistant Gemini 3.5 RAG Database, dan verifikasi login OTP WhatsApp. |
+| 1 | **Video Progres** | *[Tempelkan link YouTube / Drive Video Progres 1]* | ⏳ Siap Diisi | Presentasi rancangan PRD, SRS, pemodelan ERD database, dan wireframe antarmuka UI/UX. |
+
 
 ---
 
