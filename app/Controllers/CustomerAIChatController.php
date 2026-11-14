@@ -671,6 +671,18 @@ class CustomerAIChatController
             return ['intent' => 'greeting', 'context' => $context, 'data' => []];
         }
 
+        // 3g. Ungkapan Terima Kasih
+        if (
+            str_contains($norm, 'terima kasih') || 
+            str_contains($norm, 'makasih') || 
+            str_contains($norm, 'tengkyu') || 
+            str_contains($norm, 'thanks') ||
+            str_contains($norm, 'thank you')
+        ) {
+            $context = "Pengguna menyampaikan terima kasih atas bantuan asisten. Tanggapi dengan hangat, ramah, dan sampaikan kesiapan untuk selalu membantu.";
+            return ['intent' => 'gratitude', 'context' => $context, 'data' => []];
+        }
+
         // 4. Kupon, Voucher & Promo Diskon
         if (
             str_contains($norm, 'promo') ||
@@ -2007,6 +2019,9 @@ class CustomerAIChatController
                     return "Halo Admin **{$displayName}**! 📊 Asisten toko NNasa AI siap membantu memantau omzet penjualan, pesanan masuk, persediaan stok, atau riwayat pembeli. Apa yang ingin dicek hari ini? 💼";
                 }
                 return "Halo Kak **{$displayName}**! Selamat datang di **Nnaco.SA** 💕 Aku asisten virtual toko yang siap membantu rekomendasi aksesoris, info stok, cek pesanan, hingga tips belanja. Ada yang bisa aku bantu hari ini? 🌸";
+
+            case 'gratitude':
+                return $prefix . "Sama-sama dengan senang hati! 💕 Senang sekali bisa membantu Kakak hari ini. Jika butuh bantuan memilih aksesoris atau cek pesanan lagi, jangan sungkan kabari aku ya! ✨🌸";
 
             case 'general':
             default:
