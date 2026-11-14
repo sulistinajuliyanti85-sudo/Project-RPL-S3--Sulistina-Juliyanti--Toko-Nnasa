@@ -11,7 +11,7 @@
 * **Mata Kuliah**: Rekayasa Perangkat Lunak (RPL)
 * **Dosen Pengampu**: *[Nama Dosen Pengampu / Pak Yudis]*
 * **Judul Proyek**: Pengembangan Sistem Informasi Marketplace Toko Aksesoris Wanita Berbasis Asisten Cerdas (AI Context Grounding) dan Otentikasi OTP WhatsApp (*nnasa_ca*)
-* **Tautan Repositori GitHub**: [https://github.com/sulistinajuliyanti85-sudo/projek-toko-nnasa](https://github.com/sulistinajuliyanti85-sudo/projek-toko-nnasa)
+* **Tautan Repositori GitHub**: [https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa](https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa)
 
 ---
 

@@ -14,7 +14,7 @@
 | **Kelompok** | *[Silakan isi Nomor/Nama Kelompok Anda di sini]* |
 | **Tema / Topik Kelompok** | Marketplace Toko Aksesoris Wanita Berbasis Kecerdasan Buatan (AI) & OTP Gateway |
 | **Nama Aplikasi** | **nnasa_ca (Nnaco.SA)** |
-| **Repositori GitHub** | [https://github.com/sulistinajuliyanti85-sudo/projek-toko-nnasa](https://github.com/sulistinajuliyanti85-sudo/projek-toko-nnasa) |
+| **Repositori GitHub** | [https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa](https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa) |
 | **Teknologi Utama** | PHP 8.2 (Native MVC), MariaDB/MySQL (PDO InnoDB), Bootstrap 5.3, Google Gemini 3.5 LLM, Fonnte WhatsApp Gateway |
 
 ---
@@ -84,7 +84,7 @@ Ikuti langkah-langkah mudah berikut untuk menjalankan aplikasi di komputer lokal
 ### 2. Kloning & Penempatan Proyek
 1. Buka terminal atau Git Bash, lalu kloning repositori ini:
    ```bash
-   git clone https://github.com/sulistinajuliyanti85-sudo/projek-toko-nnasa.git
+   git clone https://github.com/sulistinajuliyanti85-sudo/Project-RPL-S3--Sulistina-Juliyanti--Toko-Nnasa.git
    ```
 2. Pastikan folder proyek berada di direktori `htdocs` server XAMPP Anda:
    ```text
