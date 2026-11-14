@@ -204,7 +204,8 @@ class CustomerAIChatController
                                . "ATURAN MENJAWAB (PENTING: SINGKAT, PADAT & TO-THE-POINT):\n"
                                . "1. JAWAB SINGKAT & LANGSUNG PADA INTI (Maksimal 2-4 kalimat atau poin-poin ringkas). Dilarang bertele-tele!\n"
                                . "2. Untuk data toko (omzet, pesanan, pembeli, stok, produk), sebutkan angka faktual dari Data Resmi Database.\n"
-                               . "3. Gunakan bahasa Indonesia profesional dan format markdown tebal pada data/angka penting.\n";
+                               . "3. JANGAN PERNAH menyebutkan User ID, ID pengguna, atau nomor ID sistem saat menyapa atau menjawab pertanyaan identitas (seperti 'siapa saya'). Cukup sebutkan nama dan peran saja!\n"
+                               . "4. Gunakan bahasa Indonesia profesional dan format markdown tebal pada data/angka penting.\n";
         } else {
             // Konstruksi System Instruction ramah untuk Pelanggan (Customer)
             $systemInstruction = "Kamu adalah NNasa AI Assistant, asisten virtual resmi toko aksesoris 'Nnaco.SA'.\n"
@@ -213,8 +214,9 @@ class CustomerAIChatController
                                . "1. JAWAB SINGKAT & JELAS: Maksimal 2 hingga 3 paragraf pendek atau 2-4 kalimat ringkas. JANGAN bertele-tele dan hindari pengantar/penutup yang terlalu panjang!\n"
                                . "2. TIPS & PANDUAN: Jika memberikan tips atau panduan, tuliskan maksimal 3 poin singkat (masing-masing cukup 1 kalimat).\n"
                                . "3. DATA TOKO: Untuk harga, ketersediaan stok, promo kupon, status pesanan, dan ongkir ekspedisi, gunakan data resmi Database Toko. Jika merekomendasikan produk, sebutkan maksimal 2-3 produk terbaik secara ringkas (nama & harga).\n"
-                               . "4. Jika produk yang dicari belum ada di katalog, sampaikan secara singkat dan ramah, lalu sebutkan 1-2 alternatif terdekat.\n"
-                               . "5. Gunakan format yang rapi dan sentuhan sedikit emoji manis (🌸, ✨, 💕).\n";
+                               . "4. JANGAN PERNAH menyebutkan User ID, ID akun, atau nomor ID sistem apa pun saat menyapa atau menjawab pertanyaan identitas (seperti 'siapa saya'). Cukup sebutkan nama dan status akun saja.\n"
+                               . "5. Jika produk yang dicari belum ada di katalog, sampaikan secara singkat dan ramah, lalu sebutkan 1-2 alternatif terdekat.\n"
+                               . "6. Gunakan format yang rapi dan sentuhan sedikit emoji manis (🌸, ✨, 💕).\n";
         }
 
         // 3. CONTEXT INJECTION MENYELURUH DARI DATABASE (ROLE-BASED RAG ENGINE)
@@ -961,7 +963,7 @@ class CustomerAIChatController
 
         if ($isPureIdentity) {
             $context = $isLoggedIn
-                ? "Data Identitas: Pengguna saat ini sudah login dengan nama {$displayName} (User ID: {$userId}, Peran: " . ($isAdmin ? 'Admin' : 'Customer') . ")."
+                ? "Data Identitas: Pengguna saat ini sudah login dengan nama {$displayName} (Peran: " . ($isAdmin ? 'Admin' : 'Customer') . " di toko e-commerce Nnaco.SA). PENTING: Jangan menyebutkan User ID atau angka ID sistem, cukup sebutkan nama dan peran akun saja secara ramah."
                 : "Data Identitas: Pengguna saat ini belum login (Pengunjung/Guest).";
             return ['intent' => 'identity_inquiry', 'context' => $context, 'data' => ['is_logged_in' => $isLoggedIn, 'is_admin' => $isAdmin]];
         }
