@@ -153,41 +153,38 @@ Aplikasi dikembangkan menggunakan arsitektur **Model-View-Controller (MVC)** yan
   - `FeatureRegistry.php`: Kamus semantik 16 halaman publik dan 18 modul admin.
   - `AIService.php`: Pengelola integrasi Google Gemini API dan fallback lokal.
 
-```mermaid
-graph TD
-    User([PENGGUNA / BROWSER])
-
-    View[MVC VIEW LAYER<br>(Bootstrap 5/CSS)]
-    Widget[AI CHAT WIDGET<br>(ai-chat.js)]
-    
-    Controller[CONTROLLER & ROUTING LAYER<br>(index.php, checkout.php, api/ai-chat.php, Controller)]
-    
-    DBHelper[DATABASE HELPER<br>(PDO Transactions)]
-    AIService[AI SERVICE LAYER<br>(Product/Order/FeatureRegistry)]
-    
-    DB[(MARIADB DATABASE<br>21 Tabel SQL)]
-    Gemini{{GEMINI 3.5 API<br>Cloud LLM Cloud}}
-    WA{{FONNTE WHATSAPP<br>OTP Gateway}}
-
-    User -- "HTTP Request" --> View
-    User -- "AJAX / JSON" --> Widget
-
-    View --> Controller
-    Widget --> Controller
-
-    Controller -- "Business Logic" --> DBHelper
-    Controller -- "AI Orchestration" --> AIService
-
-    DBHelper --> DB
-    AIService --> Gemini
-    AIService --> WA
-    
-    classDef default fill:#f9f9f9,stroke:#333,stroke-width:2px;
-    classDef db fill:#e1f5fe,stroke:#0277bd,stroke-width:2px;
-    classDef api fill:#fff3e0,stroke:#e65100,stroke-width:2px;
-    
-    class DB db;
-    class Gemini,WA api;
+```
+       +-------------------------------------------------------------+
+       |                     PENGGUNA / BROWSER                      |
+       +-------------------------------------------------------------+
+             |                                             |
+             v (HTTP Request)                              v (AJAX / JSON)
+       +--------------------+                    +-------------------+
+       |   MVC VIEW LAYER   |                    |   AI CHAT WIDGET  |
+       |  (Bootstrap 5/CSS) |                    |  (ai-chat.js)     |
+       +--------------------+                    +-------------------+
+             |                                             |
+             v                                             v
+       +-------------------------------------------------------------+
+       |               CONTROLLER & ROUTING LAYER                    |
+       |  (index.php, checkout.php, api/ai-chat.php, Controller)     |
+       +-------------------------------------------------------------+
+             |                                             |
+             | (Business Logic)                            | (AI Orchestration)
+             v                                             v
+       +--------------------+                    +-------------------+
+       |   DATABASE HELPER  |                    |  AI SERVICE LAYER |
+       | (PDO Transactions) |                    | (Product/Order/   |
+       +--------------------+                    |  FeatureRegistry) |
+             |                                   +-------------------+
+             |                                             |
+             |                                 +-----------+-----------+
+             |                                 |                       |
+             v                                 v                       v
+       +--------------------+        +-------------------+   +-----------------+
+       |  MARIADB DATABASE  |        | GEMINI 3.5 API    |   | FONNTE WHATSAPP |
+       |   (21 Tabel SQL)   |        | (Cloud LLM Cloud) |   | (OTP Gateway)   |
+       +--------------------+        +-------------------+   +-----------------+
 ```
 
 ---
